@@ -8,7 +8,7 @@ from typing import List
 EMERALD_SYMBOL = "EMERALDS"
 
 POS_LIMITS = {
-    EMERALD_SYMBOL: 50,
+    EMERALD_SYMBOL: 80,
 }
 
 
@@ -162,8 +162,8 @@ class EmeraldsTrader(ProductTrader):
        • If we carry inventory, also close it at exactly wall_mid.
 
     2. MAKING — collect the spread
-       • Post a bid  at wall_mid - 1  (9 999)   ← best bid in the book
-       • Post an ask at wall_mid + 1  (10 001)   ← best ask in the book
+       • Post a bid  at best_bid + 1  (9 993)   ← best bid in the book
+       • Post an ask at best_ask - 1  (10 007)   ← best ask in the book
        • Size = full remaining position capacity on each side, so we always
          absorb as much order flow as possible without exceeding limits.
     """
@@ -175,15 +175,20 @@ class EmeraldsTrader(ProductTrader):
 
         if self.wall_mid is None:
             return {}
-
+        
+        # Here we're setting the fair value to 10000
         fv = self.wall_mid  # 10 000 for EMERALDS
 
         # ── 1. TAKING ─────────────────────────────────────────────────────────
 
         # Lift every ask that is below fair value
         for sp, sv in self.mkt_sell_orders.items():
+            
+            # If there's an order below fv, bid and fill that order
             if sp < fv:
                 self.bid(sp, sv, logging=False)
+            
+            # If we have short positions open, put a bid at fair value to close the position
             elif sp == fv and self.initial_position < 0:
                 # Flatten short inventory at fair value (no edge, but reduces risk)
                 self.bid(sp, min(sv, abs(self.initial_position)), logging=False)
@@ -198,9 +203,9 @@ class EmeraldsTrader(ProductTrader):
 
         # ── 2. MAKING ─────────────────────────────────────────────────────────
 
-        # Quote 1 tick inside fair value; sizes limited by remaining capacity
-        self.bid(fv - 1, self.max_allowed_buy_volume)
-        self.ask(fv + 1, self.max_allowed_sell_volume)
+        # Quote 7 ticks inside fair value; sizes limited by remaining capacity
+        self.bid(self.best_bid + 1, self.max_allowed_buy_volume)
+        self.ask(self.best_ask - 1, self.max_allowed_sell_volume)
 
         self.log("POS",  self.initial_position)
         self.log("BWALL", self.bid_wall)
