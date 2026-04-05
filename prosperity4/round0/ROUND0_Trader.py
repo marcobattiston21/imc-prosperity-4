@@ -48,7 +48,7 @@ class ProductTrader:
         # Recover the max volume bid and ask price, the worst bid and ask prices (further from mid price) and the best ones (closer to the mid price) and computes the spread
         self.max_vol_bid_price, self.max_vol_ask_price = self._get_max_vol_ask_bid()
         self.worst_bid, self.worst_ask = self._get_worst_bid_ask()
-        self.best_bid, self.best_ask = self._get_best_bid_ask()
+        self.best_bid, self.mid_price, self.best_ask = self._get_best_bid_ask()
         try: self.spread = self.best_ask - self.best_bid
         except: pass
         # Computes the max volumes we can trade based on the _get_max_volumes function
@@ -94,7 +94,7 @@ class ProductTrader:
         
         return max_vol_bid_price, max_vol_ask_price
     
-    # Function used to recover the worst price of both bid and ask
+    # Function used to recover the worst price of both bid and ask and mid price
     def _get_worst_bid_ask(self) -> tuple:
 
         worst_bid = worst_ask = None
@@ -104,6 +104,7 @@ class ProductTrader:
         try: worst_ask = max(self.mkt_sell_orders)
         except: pass
         
+
         return worst_bid, worst_ask
 
     # Function used to recover the best price of both bid and ask
@@ -111,8 +112,8 @@ class ProductTrader:
     
         best_bid = max(self.mkt_buy_orders, default=None)
         best_ask = min(self.mkt_sell_orders, default=None)
-    
-        return best_bid, best_ask
+        mid_price = (best_bid + best_ask) / 2
+        return best_bid, mid_price, best_ask
 
     # Function used to compute the maximum possible order size
     def _get_max_volumes(self) -> tuple[int, int]:
@@ -237,65 +238,79 @@ class TomatoesTrader(ProductTrader):
     def __init__(self, state: TradingState, prints: dict, new_trader_data: dict):
         super().__init__(TOMATOES_SYMBOL, state, prints, new_trader_data)
 
-    # Function which applies our strategy for Emeralds trading, outputs a dictionary containing the product name and the orders as a list
+    # Function which applies our strategy for Tomatoes trading, outputs a dictionary containing the product name and the orders as a list
     def get_orders(self) -> dict:
         '''
-        Stratagy for the TOMATOES: ############################ NEED TO BE WORKED ON ########################################
-        - FAIR VALUE: Set dynamically as the mid point of maximum volume bids and asks
-        - MARKET TAKING: Since the fair value is fixed, we fill all the bid orders above the fair value (placing an ask order at that price)
-                         Since the fair value is fixed, we fill all the ask orders below the fair value (placing a bid order at that price)
-        - MARKET MAKING: We set orders at best_bid + 1 and best_ask -1 so that they get filled before the ones at the best possible values, if they don't get filled in the timestep,
-                        they get automatically cancelled.
-        - INVENTORY MANAGEMENT: 
+        Strategy for TOMATOES: Mean reversion using a 20-tick rolling Z-score.
+        - Entry: sell when z > 2, buy when z < -2
+        - Exit: close short when z < 0, close long when z > 0
+        If nothing happens, do simple MM
         '''
-        
+
         # If either price is 0 (no valid max-volume level found), skip trading this tick
         if self.max_vol_bid_price == 0 or self.max_vol_ask_price == 0:
             return {self.name: self.orders}
-        
+
         # Here we're setting the fair value to (max vol bid + max vol ask) / 2
         fv = (self.max_vol_ask_price + self.max_vol_bid_price) / 2
 
-        # --- MARKET TAKING ---
+        
+        # Load price history from previous ticks, append current mid price, keep last 20
+        history: list = self.last_traderData.get("TOM_prices", [])
+        history.append(self.mid_price)
+        if len(history) > 20:
+            history = history[-20:]
+        self.new_trader_data["TOM_prices"] = history
 
-        # This loop checks all the sell orders in the order book {sp = price, sv = volume}
-        for sp, sv in self.mkt_sell_orders.items():
-            
-            # If there's an order below fair value, bid and fill that order. Max allocation is updated automatically
-            if sp < fv:
-                self.bid(sp, sv, logging=False)
-            
-            # If we have short positions open and there's a sell order at fair value, put a bid at fair value to close the position
-            elif sp == fv and self.initial_position < 0:
+        # Need at least 20 data points to compute a meaningful z-score, if not just MM
+        if len(history) < 20:
 
-                # Flatten short inventory at fair value
-                self.bid(sp, min(sv, abs(self.initial_position)), logging=False)
+            if self.best_bid is not None and self.max_allowed_buy_volume > 0:
+                self.bid(min(self.best_bid + 1, fv - 1), self.max_allowed_buy_volume)
+            if self.best_ask is not None and self.max_allowed_sell_volume > 0:
+                self.ask(max(self.best_ask - 1, fv + 1), self.max_allowed_sell_volume)
 
+            return {self.name: self.orders}
 
-        # This loop checks all the buy orders in the order book {bp = price, bv = volume}
-        for bp, bv in self.mkt_buy_orders.items():
-            
-            # If there's an order above fair value, ask and fill that order. Max allocation is updated automatically
-            if bp > fv:
-                self.ask(bp, bv, logging=False)
-            
-            # If we have a long position open and there's a buy order at fair value, but an ask at fair value to close the position
-            elif bp == fv and self.initial_position > 0:
+        mean = sum(history) / len(history)
+        std = (sum((x - mean) ** 2 for x in history) / (len(history)) ** 0.5)
 
-                # Flatten long inventory at fair value
-                self.ask(bp, min(bv, self.initial_position), logging=False)
+        # Avoid division by zero if prices are flat, if it is just MM
+        if std == 0:
+            if self.best_bid is not None and self.max_allowed_buy_volume > 0:
+                self.bid(min(self.best_bid + 1, fv - 1), self.max_allowed_buy_volume)
+            if self.best_ask is not None and self.max_allowed_sell_volume > 0:
+                self.ask(max(self.best_ask - 1, fv + 1), self.max_allowed_sell_volume)
 
-        # --- MARKET MAKING ---
+            return {self.name: self.orders}
 
-        # Quote 1 tick better than current best bid and ask, checks to avoid crossing the fair value; sizes limited by remaining capacity
-        if self.best_bid is not None:
+        z_score = (self.mid_price - mean) / std
+
+        # Place a sell order at fair value when the z score is higher than 2, place a buy order at fv when the z score is lower than -2
+        if z_score > 2:
+            self.ask(fv, self.max_allowed_sell_volume, logging=False)
+        elif z_score < -2:
+            self.bid(fv, self.max_allowed_buy_volume, logging=False)
+
+        
+        # Exit short when z-score falls back below 0
+        if z_score < 0 and self.initial_position < 0:
+            self.bid(fv, abs(self.initial_position), logging=False)
+        # Exit long when z-score rises back above 0
+        elif z_score > 0 and self.initial_position > 0:
+            self.ask(fv, abs(self.initial_position), logging=False)
+
+        # Market Making if we still have inventory available
+        if self.best_bid is not None and self.max_allowed_buy_volume > 0:
             self.bid(min(self.best_bid + 1, fv - 1), self.max_allowed_buy_volume)
-        if self.best_ask is not None:
+        if self.best_ask is not None and self.max_allowed_sell_volume > 0:
             self.ask(max(self.best_ask - 1, fv + 1), self.max_allowed_sell_volume)
+
 
         self.log("POS",  self.initial_position)
         self.log("WBID", self.worst_bid)
         self.log("WASK", self.worst_ask)
+        self.log("Z",    round(z_score, 3))
 
         return {self.name: self.orders}
 
