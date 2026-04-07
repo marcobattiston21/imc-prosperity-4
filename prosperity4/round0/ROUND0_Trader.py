@@ -113,6 +113,7 @@ class ProductTrader:
         best_bid = max(self.mkt_buy_orders, default=None)
         best_ask = min(self.mkt_sell_orders, default=None)
         mid_price = (best_bid + best_ask) / 2
+
         return best_bid, mid_price, best_ask
 
     # Function used to compute the maximum possible order size
@@ -241,10 +242,8 @@ class TomatoesTrader(ProductTrader):
     # Function which applies our strategy for Tomatoes trading, outputs a dictionary containing the product name and the orders as a list
     def get_orders(self) -> dict:
         '''
-        Strategy for TOMATOES: Mean reversion using a 20-tick rolling Z-score.
-        - Entry: sell when z > 2, buy when z < -2
-        - Exit: close short when z < 0, close long when z > 0
-        If nothing happens, do simple MM
+        FOR NOW ONLY MARKET MAKING AND MARKET TAKING IF ORDER CROSS FV
+        !!! TRY CHECKING FOR GAPS BETWEEN BEST BID AND SECOND BEST BIGGER THAN 2, IF THERE ARE FILL THE ORDERS AT BEST BID, BUY BACK AT SECOND BEST BID + 1 PLACING BID ORDERS, SAME FOR ASK !!!
         '''
 
         # If either price is 0 (no valid max-volume level found), skip trading this tick
@@ -255,62 +254,38 @@ class TomatoesTrader(ProductTrader):
         fv = (self.max_vol_ask_price + self.max_vol_bid_price) / 2
 
         
-        # Load price history from previous ticks, append current mid price, keep last 20
-        history: list = self.last_traderData.get("TOM_prices", [])
-        history.append(self.mid_price)
-        if len(history) > 20:
-            history = history[-20:]
-        self.new_trader_data["TOM_prices"] = history
-
-        # Need at least 20 data points to compute a meaningful z-score, if not just MM
-        if len(history) < 20:
-
-            if self.best_bid is not None and self.max_allowed_buy_volume > 0:
-                self.bid(min(self.best_bid + 1, fv - 1), self.max_allowed_buy_volume)
-            if self.best_ask is not None and self.max_allowed_sell_volume > 0:
-                self.ask(max(self.best_ask - 1, fv + 1), self.max_allowed_sell_volume)
-
-            return {self.name: self.orders}
-
-        mean = sum(history) / len(history)
-        std = (sum((x - mean) ** 2 for x in history) / (len(history)) ** 0.5)
-
-        # Avoid division by zero if prices are flat, if it is just MM
-        if std == 0:
-            if self.best_bid is not None and self.max_allowed_buy_volume > 0:
-                self.bid(min(self.best_bid + 1, fv - 1), self.max_allowed_buy_volume)
-            if self.best_ask is not None and self.max_allowed_sell_volume > 0:
-                self.ask(max(self.best_ask - 1, fv + 1), self.max_allowed_sell_volume)
-
-            return {self.name: self.orders}
-
-        z_score = (self.mid_price - mean) / std
-
-        # Place a sell order at fair value when the z score is higher than 2, place a buy order at fv when the z score is lower than -2
-        if z_score > 2:
-            self.ask(fv, self.max_allowed_sell_volume, logging=False)
-        elif z_score < -2:
-            self.bid(fv, self.max_allowed_buy_volume, logging=False)
-
         
-        # Exit short when z-score falls back below 0
-        if z_score < 0 and self.initial_position < 0:
-            self.bid(fv, abs(self.initial_position), logging=False)
-        # Exit long when z-score rises back above 0
-        elif z_score > 0 and self.initial_position > 0:
-            self.ask(fv, abs(self.initial_position), logging=False)
+        # Check for sell orders below fv and buy orders above fv, if there's a position open and an existing order at fv, use it to remove a bit of inventory as we did before
+        for sp, sv in self.mkt_sell_orders.items():
+        
+            if sp < fv:
+                self.bid(sp, min(sv, self.max_allowed_buy_volume), logging=False)
+            
+            elif sp == fv and self.initial_position < 0:
 
-        # Market Making if we still have inventory available
-        if self.best_bid is not None and self.max_allowed_buy_volume > 0:
+                # Flatten short inventory at fair value
+                self.bid(sp, min(sv, abs(self.initial_position)), logging=False)
+
+        for bp, bv in self.mkt_buy_orders.items():
+        
+            if bp > fv:
+                self.ask(bp, min(bv, self.max_allowed_sell_volume), logging=False)
+        
+            elif bp == fv and self.initial_position > 0:
+
+                # Flatten long inventory at fair value
+                self.ask(bp, min(bv, self.initial_position), logging=False)
+
+        # Normal Market Making
+        if self.best_bid is not None:
             self.bid(min(self.best_bid + 1, fv - 1), self.max_allowed_buy_volume)
-        if self.best_ask is not None and self.max_allowed_sell_volume > 0:
+        if self.best_ask is not None:
             self.ask(max(self.best_ask - 1, fv + 1), self.max_allowed_sell_volume)
 
 
         self.log("POS",  self.initial_position)
         self.log("WBID", self.worst_bid)
         self.log("WASK", self.worst_ask)
-        self.log("Z",    round(z_score, 3))
 
         return {self.name: self.orders}
 
