@@ -46,13 +46,22 @@ class ProductTrader:
         self.mkt_buy_orders, self.mkt_sell_orders = self._parse_order_depth()
         
         # Recover the max volume bid and ask price, the worst bid and ask prices (further from mid price) and the best ones (closer to the mid price) and computes the spread
-        self.max_vol_bid_price, self.max_vol_ask_price = self._get_max_vol_ask_bid()
+        self.max_vol_bid, self.max_vol_ask = self._get_max_vol_ask_bid()
         self.worst_bid, self.worst_ask = self._get_worst_bid_ask()
-        self.best_bid, self.mid_price, self.best_ask = self._get_best_bid_ask()
-        try: self.spread = self.best_ask - self.best_bid
-        except: pass
+        self.best_bid, self.best_ask = self._get_best_bid_ask()
+        self.second_best_bid, self.second_best_ask = self._get_second_best_bid_ask()
+
         # Computes the max volumes we can trade based on the _get_max_volumes function
         self.max_allowed_buy_volume, self.max_allowed_sell_volume = self._get_max_volumes()
+
+        # Compute the bid gap and ask gap as the distance between best and second best
+        self.bid_gap = abs(self.best_bid - self.second_best_bid) if self.second_best_bid is not None else 0
+        self.ask_gap = abs(self.best_ask - self.second_best_ask) if self.second_best_ask is not None else 0
+        
+
+        # Compute the spread
+        try: self.spread = self.best_ask - self.best_bid
+        except: pass
 
 
     # Function used to recover all the data from the past iteration
@@ -112,9 +121,18 @@ class ProductTrader:
     
         best_bid = max(self.mkt_buy_orders, default=None)
         best_ask = min(self.mkt_sell_orders, default=None)
-        mid_price = (best_bid + best_ask) / 2
 
-        return best_bid, mid_price, best_ask
+        return best_bid, best_ask
+
+    # Function used to recover the second best price of both bid and ask
+    def _get_second_best_bid_ask(self) -> tuple:
+        
+        bids = list(self.mkt_buy_orders.keys())
+        asks = list(self.mkt_sell_orders.keys())
+        second_best_bid = bids[1] if len(bids) >= 2 else None
+        second_best_ask = asks[1] if len(asks) >= 2 else None
+        
+        return second_best_bid, second_best_ask
 
     # Function used to compute the maximum possible order size
     def _get_max_volumes(self) -> tuple[int, int]:
@@ -171,6 +189,8 @@ class ProductTrader:
 # Class used for EMERALDS
 class EmeraldsTrader(ProductTrader):
     
+    FV = 10000
+
     # Constructor, does the same things as the ProductTrader constructor using the super(), simply restricts to EMERALDS
     def __init__(self, state: TradingState, prints: dict, new_trader_data: dict):
         super().__init__(EMERALD_SYMBOL, state, prints, new_trader_data)
@@ -186,23 +206,22 @@ class EmeraldsTrader(ProductTrader):
                         they get automatically cancelled.
         - INVENTORY MANAGEMENT: If we have a short position open, and a sell order appears at fair value, use it to reduce the current position. Applies the other way for long positions 
         '''
-        # Here we're setting the fair value to 10000 (assumption based on the data)
-        fv = 10_000
+        fv = self.FV
 
         # --- MARKET TAKING ---
+        # If there are orders at FV, take them to offload some inventory
 
-        # This loop checks all the sell orders in the order book {sp = price, sv = volume}
         for sp, sv in self.mkt_sell_orders.items():
             
-            # If there's an order below fair value, bid and fill that order. Max allocation is updated automatically
+            # If there's an order below fair value, bid and fill that order. Max allocation is updated automatically ### THIS PRETTY MUCH NEVER HAPPENS
             if sp < fv:
-                self.bid(sp, sv, logging=False)
+                self.bid(sp, sv, logging = True)
             
-            # If we have short positions open and there's a sell order at fair value, put a bid at fair value to close the position
+            # If we have short positions open and there's a sell order at fair value, put a bid at fair value to close the position ### THIS HAPPENS QUITE OFTEN
             elif sp == fv and self.initial_position < 0:
 
                 # Flatten short inventory at fair value
-                self.bid(sp, min(sv, abs(self.initial_position)), logging=False)
+                self.bid(sp, min(sv, abs(self.initial_position)), logging = True)
 
 
         # This loop checks all the buy orders in the order book {bp = price, bv = volume}
@@ -210,13 +229,13 @@ class EmeraldsTrader(ProductTrader):
             
             # If there's an order above fair value, ask and fill that order. Max allocation is updated automatically
             if bp > fv:
-                self.ask(bp, bv, logging=False)
+                self.ask(bp, bv, logging = True)
             
             # If we have a long position open and there's a buy order at fair value, but an ask at fair value to close the position
             elif bp == fv and self.initial_position > 0:
 
                 # Flatten long inventory at fair value
-                self.ask(bp, min(bv, self.initial_position), logging=False)
+                self.ask(bp, min(bv, self.initial_position), logging = True)
 
         # --- MARKET MAKING ---
 
@@ -227,67 +246,77 @@ class EmeraldsTrader(ProductTrader):
             self.ask(max(self.best_ask - 1, fv + 1), self.max_allowed_sell_volume)
 
         self.log("POS",  self.initial_position)
-        self.log("WBID", self.worst_bid)
-        self.log("WASK", self.worst_ask)
+        self.log("BBID", self.best_bid)
+        self.log("BASK", self.best_ask)
+        self.log("MAXBUY", self.max_allowed_buy_volume)
+        self.log("MAXSELL", self.max_allowed_sell_volume)
+
 
         return {self.name: self.orders}
 
 # Class used for TOMATOES
 class TomatoesTrader(ProductTrader):
-    
-    # Constructor, does the same things as the ProductTrader constructor using the super(), simply restricts to TOMATOES
+
+
+    GAP_THRESHOLD = 2         # Minimum gap size to trigger gap exploitation
+    INVENTORY_DECAY = 0.4     # Fraction of inventory to unwind per tick
+    INV_THRESHOLD = 0
+
     def __init__(self, state: TradingState, prints: dict, new_trader_data: dict):
         super().__init__(TOMATOES_SYMBOL, state, prints, new_trader_data)
 
-    # Function which applies our strategy for Tomatoes trading, outputs a dictionary containing the product name and the orders as a list
     def get_orders(self) -> dict:
-        '''
-        FOR NOW ONLY MARKET MAKING AND MARKET TAKING IF ORDER CROSS FV
-        !!! TRY CHECKING FOR GAPS BETWEEN BEST BID AND SECOND BEST BIGGER THAN 2, IF THERE ARE FILL THE ORDERS AT BEST BID, BUY BACK AT SECOND BEST BID + 1 PLACING BID ORDERS, SAME FOR ASK !!!
-        '''
-
-        # If either price is 0 (no valid max-volume level found), skip trading this tick
-        if self.max_vol_bid_price == 0 or self.max_vol_ask_price == 0:
+ 
+        # --- SAFETY: need valid order book data ---
+        if self.best_bid is None or self.best_ask is None:
             return {self.name: self.orders}
-
-        # Here we're setting the fair value to (max vol bid + max vol ask) / 2
-        fv = (self.max_vol_ask_price + self.max_vol_bid_price) / 2
+ 
+        # FV computed as the mid price between max vol quotes
+        fv = (self.max_vol_bid + self.max_vol_ask) / 2
 
         
+        # INVENTORY MANAGEMENT: Place quotes at fair value to reduce the inventory linearly when it is above the 
+        if self.initial_position > self.INV_THRESHOLD:
+            reduce_qty = max(1, int(self.initial_position * self.INVENTORY_DECAY))
+            self.ask(fv, reduce_qty, logging = True)
+        elif self.initial_position < -self.INV_THRESHOLD:
+            reduce_qty = max(1, int(abs(self.initial_position) * self.INVENTORY_DECAY))
+            self.bid(fv, reduce_qty, logging = True)
+
+
+        # If the spread is thin, it means there's an order further from the clusters, so we fill it and replace it closer to the cluster to capture the spread
+        if self.spread <= 10 and self.max_allowed_buy_volume > 0 and self.max_allowed_sell_volume > 0:
+            if self.bid_gap > self.GAP_THRESHOLD:
+                self.ask(self.best_bid, self.mkt_buy_orders[self.best_bid], logging = True)
+                self.bid(self.second_best_bid + 1, self.max_allowed_buy_volume, logging = True)
+                self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging = True)
+
+            elif self.ask_gap > self.GAP_THRESHOLD:
+                self.bid(self.best_ask, self.mkt_sell_orders[self.best_ask], logging = True)
+                self.ask(self.second_best_ask + 1, self.max_allowed_sell_volume, logging = True)
+                self.bid(self.best_bid + 1, self.max_allowed_buy_volume, logging = True)
         
-        # Check for sell orders below fv and buy orders above fv, if there's a position open and an existing order at fv, use it to remove a bit of inventory as we did before
-        for sp, sv in self.mkt_sell_orders.items():
-        
-            if sp < fv:
-                self.bid(sp, min(sv, self.max_allowed_buy_volume), logging=False)
-            
-            elif sp == fv and self.initial_position < 0:
+        # If the spread is wide, do normal market making
+        elif self.spread > 10:
+            if self.max_allowed_buy_volume > 0:  
+                self.bid(self.best_bid + 1, self.max_allowed_buy_volume, logging = True)
+            if self.max_allowed_sell_volume > 0:
+                self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging = True)
+    
 
-                # Flatten short inventory at fair value
-                self.bid(sp, min(sv, abs(self.initial_position)), logging=False)
-
-        for bp, bv in self.mkt_buy_orders.items():
-        
-            if bp > fv:
-                self.ask(bp, min(bv, self.max_allowed_sell_volume), logging=False)
-        
-            elif bp == fv and self.initial_position > 0:
-
-                # Flatten long inventory at fair value
-                self.ask(bp, min(bv, self.initial_position), logging=False)
-
-        # Normal Market Making
-        if self.best_bid is not None:
-            self.bid(min(self.best_bid + 1, fv - 1), self.max_allowed_buy_volume)
-        if self.best_ask is not None:
-            self.ask(max(self.best_ask - 1, fv + 1), self.max_allowed_sell_volume)
-
-
-        self.log("POS",  self.initial_position)
-        self.log("WBID", self.worst_bid)
-        self.log("WASK", self.worst_ask)
-
+        self.log("POS", self.initial_position)
+        self.log("FV", round(fv, 2))
+        self.log("BBID", self.best_bid)
+        self.log("BASK", self.best_ask)
+        self.log("SPREAD", self.spread)
+        self.log("BID_GAP", self.bid_gap)
+        self.log("ASK_GAP", self.ask_gap)
+        self.log("MAXBUY", self.max_allowed_buy_volume)
+        self.log("MAXSELL", self.max_allowed_sell_volume)
+ 
         return {self.name: self.orders}
+ 
+ 
 
 # TRADER CLASS
 class Trader:
