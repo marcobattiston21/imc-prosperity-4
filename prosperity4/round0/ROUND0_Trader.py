@@ -257,52 +257,75 @@ class EmeraldsTrader(ProductTrader):
 # Class used for TOMATOES
 class TomatoesTrader(ProductTrader):
 
+    '''
+    TOMATOES STRATEGY:
+    FV Estimation: We compute the VWAP tick by tick, then compute the average of last 5 ticks and that is the Fair Value (Combination of SMA 5 and VWAP)
+    Inventory Management: If we're long and there's a bid further from the cluster and less that 1 tick from Fair Value, we use this to lower our inventory, then market make inside the spread once removed the mispriced bid. Same for the opposite side
+    Then just normal Market Making
+    '''
 
-    GAP_THRESHOLD = 2         # Minimum gap size to trigger gap exploitation
-    INVENTORY_DECAY = 0.4     # Fraction of inventory to unwind per tick
-    INV_THRESHOLD = 0
+    GAP_THRESHOLD = 2
+    INV_THRESHOLD = 20
+    FV_THRESHOLD = 1
+    SPREAD_THRESHOLD = 10
+    SMA_WINDOW = 5
 
     def __init__(self, state: TradingState, prints: dict, new_trader_data: dict):
         super().__init__(TOMATOES_SYMBOL, state, prints, new_trader_data)
 
+    def _get_sma_fv(self, current_fv: float) -> float:
+        history: list = self.last_traderData.get("tom_fv_history", [])
+        history.append(current_fv)
+        history = history[-self.SMA_WINDOW:]
+        self.new_trader_data["tom_fv_history"] = history
+        return sum(history) / len(history)
+
+    def _get_vwap(self) -> float:
+        bid, ask = 0, 0
+        vol = 0
+        
+        for bp, bv in self.mkt_buy_orders.items():
+            bid += bp * bv
+            vol += bv
+        
+        for ap, av in self.mkt_sell_orders.items():
+            ask += ap * av
+            vol += av
+        
+        return (bid + ask) / vol
+
     def get_orders(self) -> dict:
- 
+
         # --- SAFETY: need valid order book data ---
         if self.best_bid is None or self.best_ask is None:
             return {self.name: self.orders}
- 
-        # FV computed as the mid price between max vol quotes
-        fv = (self.max_vol_bid + self.max_vol_ask) / 2
 
-        
-        # INVENTORY MANAGEMENT: Place quotes at fair value to reduce the inventory linearly when it is above the 
-        if self.initial_position > self.INV_THRESHOLD:
-            reduce_qty = max(1, int(self.initial_position * self.INVENTORY_DECAY))
-            self.ask(fv, reduce_qty, logging = True)
-        elif self.initial_position < -self.INV_THRESHOLD:
-            reduce_qty = max(1, int(abs(self.initial_position) * self.INVENTORY_DECAY))
-            self.bid(fv, reduce_qty, logging = True)
+        fv = self._get_vwap()
 
-
-        # If the spread is thin, it means there's an order further from the clusters, so we fill it and replace it closer to the cluster to capture the spread
-        if self.spread <= 10 and self.max_allowed_buy_volume > 0 and self.max_allowed_sell_volume > 0:
-            if self.bid_gap > self.GAP_THRESHOLD:
-                self.ask(self.best_bid, self.mkt_buy_orders[self.best_bid], logging = True)
+        # If the spread is thin, it means there's an order further from the clusters, we fill it to both reduce inventory and to capture the spread in later iterations
+        if self.spread <= self.SPREAD_THRESHOLD:
+            
+            # If the order is inside a certain range from FV, pick it
+            if self.bid_gap > self.GAP_THRESHOLD and self.best_bid > fv - self.FV_THRESHOLD and self.initial_position > self.INV_THRESHOLD:
+                self.ask(self.best_bid, min(self.initial_position, self.mkt_buy_orders[self.best_bid]), logging = True)
                 self.bid(self.second_best_bid + 1, self.max_allowed_buy_volume, logging = True)
                 self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging = True)
 
-            elif self.ask_gap > self.GAP_THRESHOLD:
-                self.bid(self.best_ask, self.mkt_sell_orders[self.best_ask], logging = True)
-                self.ask(self.second_best_ask + 1, self.max_allowed_sell_volume, logging = True)
+            elif self.ask_gap > self.GAP_THRESHOLD and self.best_ask < fv + self.FV_THRESHOLD and self.initial_position < -self.INV_THRESHOLD:
+                self.bid(self.best_ask,min(abs(self.initial_position), self.mkt_sell_orders[self.best_ask]), logging = True)
+                self.ask(self.second_best_ask - 1, self.max_allowed_sell_volume, logging = True)
                 self.bid(self.best_bid + 1, self.max_allowed_buy_volume, logging = True)
+            
+            # Otherwise just market make inside the bid ask spread
+            else:
+                self.bid(self.best_bid + 1, self.max_allowed_buy_volume, logging = True)
+                self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging = True)
         
         # If the spread is wide, do normal market making
-        elif self.spread > 10:
-            if self.max_allowed_buy_volume > 0:  
-                self.bid(self.best_bid + 1, self.max_allowed_buy_volume, logging = True)
-            if self.max_allowed_sell_volume > 0:
-                self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging = True)
-    
+        else:
+            self.bid(self.best_bid + 1, self.max_allowed_buy_volume, logging = True)
+            self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging = True)
+
 
         self.log("POS", self.initial_position)
         self.log("FV", round(fv, 2))
