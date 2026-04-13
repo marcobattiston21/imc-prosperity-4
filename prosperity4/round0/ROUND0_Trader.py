@@ -257,42 +257,14 @@ class EmeraldsTrader(ProductTrader):
 # Class used for TOMATOES
 class TomatoesTrader(ProductTrader):
  
-    '''
-    TOMATOES STRATEGY:
- 
-    FV Estimation: mid price of max-volume bid and ask levels.
- 
-    Two operating modes based on z-score from 200-tick rolling mean:
- 
-    === NORMAL MODE (|z-score| <= ZSCORE_THRESHOLD) ===
-    Exactly the baseline: gap exploitation to flatten inventory, then two-sided MM.
- 
-    === MEAN-REVERSION MODE (|z-score| > ZSCORE_THRESHOLD) ===
-    Price is many standard deviations from its long-run mean → expect it to revert.
- 
-    How we BUILD directional inventory:
-    1. Gap exploitation is FLIPPED: instead of using outlier orders to flatten,
-       we use them to build position in the reversion direction.
-       - Price too HIGH → sell into any isolated high bid (even if we're already short)
-       - Price too LOW  → buy any isolated low ask (even if we're already long)
-    2. We also aggressively take any mispriced levels that align with our direction
-       (market-take all bids above FV when going short, all asks below FV when going long).
- 
-    How we HOLD directional inventory:
-    3. One-sided MM: only quote on the accumulation side, so bots can't fill us
-       back to neutral. If we want short → only place asks. If we want long → only place bids.
-    4. The position limit cap in bid()/ask() naturally prevents over-accumulation.
-    '''
- 
     GAP_THRESHOLD = 2
     INV_THRESHOLD = 0
     FV_THRESHOLD_LOADING = 2
     FV_THRESHOLD_CLEARING = 1
     SPREAD_THRESHOLD = 10
- 
-    # --- Mean-reversion parameters ---
-    MEAN_REV_LOOKBACK = 100    # Rolling window for long-run SMA and std dev
-    ZSCORE_THRESHOLD_LOADING = 2    # Z-score level to enter mean-reversion mode (tune this)
+
+    MEAN_REV_LOOKBACK = 100    
+    ZSCORE_THRESHOLD_LOADING = 2   
     ZSCORE_THRESHOLD_CLEARING = 1       
 
     def __init__(self, state: TradingState, prints: dict, new_trader_data: dict):
@@ -300,19 +272,14 @@ class TomatoesTrader(ProductTrader):
  
  
     def _compute_deviation(self, fv: float) -> float:
-        """
-        Appends current FV to a 100-tick rolling history (persisted in traderData).
-        Returns z-score = (fv - sma) / std, measuring how many standard deviations
-        the current price is from its rolling mean.
-        Returns 0.0 during warmup (< 20 observations) so we stay in normal mode.
-        """
+
         history: list = self.last_traderData.get("tom_mr_history", [])
         history.append(fv)
         history = history[-self.MEAN_REV_LOOKBACK:]
         self.new_trader_data["tom_mr_history"] = history
  
         n = len(history)
-        if n < 50:
+        if n < 10:
             return 0.0
  
         sma = sum(history) / n
@@ -346,7 +313,7 @@ class TomatoesTrader(ProductTrader):
 
                 # We fill all buy orders that are above our threshold (fv - 2)
                 for bp, bv in self.mkt_buy_orders.items():
-                    if bp >= int(fv - self.FV_THRESHOLD_LOADING):
+                    if bp >= fv:
                         self.ask(bp, bv, logging = True)
                 
                 # ONE-SIDED MM: only place asks so bots can't buy us back to neutral
@@ -357,7 +324,7 @@ class TomatoesTrader(ProductTrader):
 
                 # We fill all sell orders that are below our threshold (fv + 2)
                 for ap, av in self.mkt_sell_orders.items():
-                    if ap <= round(fv + self.FV_THRESHOLD_LOADING):
+                    if ap <= fv:
                         self.bid(ap, av, logging = True)
 
                 # ONE-SIDED MM: only place bids so bots can't sell us back to neutral
@@ -370,10 +337,10 @@ class TomatoesTrader(ProductTrader):
             if self.spread <= self.SPREAD_THRESHOLD:
                 
                 # If the order is inside a certain range from FV, pick it
-                if self.bid_gap > self.GAP_THRESHOLD and self.best_bid >= int(fv - self.FV_THRESHOLD_CLEARING) and self.initial_position > self.INV_THRESHOLD and -self.ZSCORE_THRESHOLD_CLEARING <= deviation <= self.ZSCORE_THRESHOLD_CLEARING:
+                if self.bid_gap > self.GAP_THRESHOLD and self.best_bid >= int(fv - self.FV_THRESHOLD_CLEARING) and self.initial_position > self.INV_THRESHOLD and 0 <= deviation <= self.ZSCORE_THRESHOLD_CLEARING:
                     self.ask(self.best_bid, min(self.initial_position, self.mkt_buy_orders[self.best_bid]), logging = True)
  
-                elif self.ask_gap > self.GAP_THRESHOLD and self.best_ask <= round(fv + self.FV_THRESHOLD_CLEARING) and self.initial_position < -self.INV_THRESHOLD and -self.ZSCORE_THRESHOLD_CLEARING <= deviation <= self.ZSCORE_THRESHOLD_CLEARING:
+                elif self.ask_gap > self.GAP_THRESHOLD and self.best_ask <= round(fv + self.FV_THRESHOLD_CLEARING) and self.initial_position < -self.INV_THRESHOLD and -self.ZSCORE_THRESHOLD_CLEARING <= deviation <= 0:
                     self.bid(self.best_ask, min(abs(self.initial_position), self.mkt_sell_orders[self.best_ask]), logging = True)
                 
                 # Otherwise just market make inside the bid ask spread
