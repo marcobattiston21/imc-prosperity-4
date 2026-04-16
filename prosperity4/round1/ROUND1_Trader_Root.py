@@ -1,19 +1,15 @@
 from datamodel import OrderDepth, TradingState, Order
 import json
 from typing import List
- 
- 
-# Assigning the variables instead of using the string all the time
-EMERALD_SYMBOL = "EMERALDS"
-TOMATOES_SYMBOL = "TOMATOES"
- 
-# Hardcoding the position limits
+
+
+ROOT_SYMBOL  = "INTARIAN_PEPPER_ROOT"
+
 POS_LIMITS = {
-    EMERALD_SYMBOL: 80,
-    TOMATOES_SYMBOL: 80,
+    ROOT_SYMBOL:   80,
 }
- 
- 
+
+
 # Blueprint class used as base for all the products. Has all the functions to recover the order book data, spread, possible trading volumes etc...
 class ProductTrader:
  
@@ -185,211 +181,132 @@ class ProductTrader:
     def get_orders(self) -> dict:
         return {}
  
-# Class used for EMERALDS
-class EmeraldsTrader(ProductTrader):
-    
-    FV = 10000
- 
-    # Constructor, does the same things as the ProductTrader constructor using the super(), simply restricts to EMERALDS
-    def __init__(self, state: TradingState, prints: dict, new_trader_data: dict):
-        super().__init__(EMERALD_SYMBOL, state, prints, new_trader_data)
- 
-    # Function which applies our strategy for Emeralds trading, outputs a dictionary containing the product name and the orders as a list
-    def get_orders(self) -> dict:
-        '''
-        Stratagy for the EMERALDS:
-        - FAIR VALUE: Set fixed at 10_000
-        - MARKET TAKING: Since the fair value is fixed, we fill all the bid orders above the fair value (placing an ask order at that price)
-                         Since the fair value is fixed, we fill all the ask orders below the fair value (placing a bid order at that price)
-        - MARKET MAKING: We set orders at best_bid + 1 and best_ask -1 so that they get filled before the ones at the best possible values, if they don't get filled in the timestep,
-                        they get automatically cancelled.
-        - INVENTORY MANAGEMENT: If we have a short position open, and a sell order appears at fair value, use it to reduce the current position. Applies the other way for long positions 
-        '''
-        fv = self.FV
- 
-        # --- MARKET TAKING ---
-        # If there are orders at FV, take them to offload some inventory
- 
-        for sp, sv in self.mkt_sell_orders.items():
-            
-            # If there's an order below fair value, bid and fill that order. Max allocation is updated automatically ### THIS PRETTY MUCH NEVER HAPPENS
-            if sp < fv:
-                self.bid(sp, sv, logging = True)
-            
-            # If we have short positions open and there's a sell order at fair value, put a bid at fair value to close the position ### THIS HAPPENS QUITE OFTEN
-            elif sp == fv and self.initial_position < 0:
- 
-                # Flatten short inventory at fair value
-                self.bid(sp, min(sv, abs(self.initial_position)), logging = True)
- 
- 
-        # This loop checks all the buy orders in the order book {bp = price, bv = volume}
-        for bp, bv in self.mkt_buy_orders.items():
-            
-            # If there's an order above fair value, ask and fill that order. Max allocation is updated automatically
-            if bp > fv:
-                self.ask(bp, bv, logging = True)
-            
-            # If we have a long position open and there's a buy order at fair value, but an ask at fair value to close the position
-            elif bp == fv and self.initial_position > 0:
- 
-                # Flatten long inventory at fair value
-                self.ask(bp, min(bv, self.initial_position), logging = True)
- 
-        # --- MARKET MAKING ---
- 
-        # Quote 1 tick better than current best bid and ask, checking that we're not crossing fair value; sizes limited by remaining capacity
-        if self.best_bid is not None:
-            self.bid(min(self.best_bid + 1, fv - 1), self.max_allowed_buy_volume)
-        if self.best_ask is not None:
-            self.ask(max(self.best_ask - 1, fv + 1), self.max_allowed_sell_volume)
- 
-        self.log("POS",  self.initial_position)
-        self.log("BBID", self.best_bid)
-        self.log("BASK", self.best_ask)
-        self.log("MAXBUY", self.max_allowed_buy_volume)
-        self.log("MAXSELL", self.max_allowed_sell_volume)
- 
- 
-        return {self.name: self.orders}
- 
-# Class used for TOMATOES
-class TomatoesTrader(ProductTrader):
- 
-    GAP_THRESHOLD = 2
-    INV_THRESHOLD = 0
-    FV_THRESHOLD_LOADING = 2
-    FV_THRESHOLD_CLEARING = 1
-    SPREAD_THRESHOLD = 10
 
-    MEAN_REV_LOOKBACK = 100    
-    ZSCORE_THRESHOLD_LOADING = 2   
-    ZSCORE_THRESHOLD_CLEARING = 1       
+class RootTrader(ProductTrader):
+    """
+    Strategy for INTARIAN_PEPPER_ROOT
+    ─────────────────────────────────
+    The asset follows an almost perfect linear trend (R²=0.9999, slope=0.001).
+    Residuals mean-revert with half-life < 1 timestamp, so there's no time to
+    trade mean-reversion directly. Instead we:
+
+    1. TREND LEG  – reserve TREND_ALLOC units as a permanent long from t=0.
+                    Buy it immediately and never sell until end of day.
+
+    2. MM LEG     – use the remaining FLUCT_ALLOC units to market-make around
+                    the rolling fair value. The spread is ~13 ticks wide, so
+                    quoting 1 tick inside best bid/ask captures ~5-6 ticks per
+                    round trip while staying close to fair value.
+                    We skew quotes based on current inventory to stay neutral.
+    """
+
+    # Linear model parameters (from analysis)
+    SLOPE     = 0.001           # price units per timestamp
+    INTERCEPT = 13000.0048      # from regression
+
+    # Position split (out of 80 limit)
+    TREND_ALLOC = 48            # held as permanent long
+    FLUCT_ALLOC = 32            # available for market making
+
+    # Market making params (tuned to the ~13 tick spread, 6.5 tick depth)
+    QUOTE_OFFSET   = 1          # quote 1 tick inside best bid/ask
+    MAX_SKEW       = 28         # start skewing quotes when abs(mm_pos) > this
+    SKEW_STEP      = 1          # extra ticks added per skew level
 
     def __init__(self, state: TradingState, prints: dict, new_trader_data: dict):
-        super().__init__(TOMATOES_SYMBOL, state, prints, new_trader_data)
- 
- 
-    def _compute_deviation(self, fv: float) -> float:
+        super().__init__(ROOT_SYMBOL, state, prints, new_trader_data)
 
-        history: list = self.last_traderData.get("tom_mr_history", [])
-        history.append(fv)
-        history = history[-self.MEAN_REV_LOOKBACK:]
-        self.new_trader_data["tom_mr_history"] = history
- 
-        n = len(history)
-        if n < 10:
-            return 0.0
- 
-        sma = sum(history) / n
-        variance = sum((x - sma) ** 2 for x in history) / n
-        std = variance ** 0.5
- 
-        if std < 1e-9:
-            return 0.0
- 
-        return (fv - sma) / std
- 
+        # Retrieve persistent state from previous iteration
+        self.trend_bought: bool = self.last_traderData.get("root_trend_bought", False)
+        self.mm_position:  int  = self.last_traderData.get("root_mm_pos", 0)
+
+    def _fair_value(self) -> float:
+        # Rolling fair value: intercept + slope × current timestamp
+        return self.INTERCEPT + self.SLOPE * self.state.timestamp
+
+    def _mm_capacity(self) -> tuple[int, int]:
+        """
+        The MM book can go from -FLUCT_ALLOC to +FLUCT_ALLOC around neutral.
+        Returns (max_mm_buy, max_mm_sell) based on current mm_position.
+        """
+        max_mm_buy  = self.FLUCT_ALLOC - self.mm_position
+        max_mm_sell = self.FLUCT_ALLOC + self.mm_position
+        return max(max_mm_buy, 0), max(max_mm_sell, 0)
+
     def get_orders(self) -> dict:
- 
-        # --- SAFETY: need valid order book data ---
+
         if self.best_bid is None or self.best_ask is None:
             return {self.name: self.orders}
- 
-        fv = (self.max_vol_bid + self.max_vol_ask) / 2
-        deviation = self._compute_deviation(fv)
- 
-        # Determine regime
-        mean_rev_short = deviation > self.ZSCORE_THRESHOLD_LOADING    # price too HIGH → want to go short
-        mean_rev_long  = deviation < -self.ZSCORE_THRESHOLD_LOADING   # price too LOW  → want to go long
-        mean_rev_active = mean_rev_short or mean_rev_long
- 
 
-        if mean_rev_active:
- 
-            if mean_rev_short:
-                # --- GOAL: accumulate and hold SHORT inventory ---
+        fv = self._fair_value()
 
-                # We fill all buy orders that are above our threshold (fv - 2)
-                for bp, bv in self.mkt_buy_orders.items():
-                    if bp >= fv:
-                        self.ask(bp, bv, logging = True)
-                
-                # ONE-SIDED MM: only place asks so bots can't buy us back to neutral
-                self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging = True)
- 
-            elif mean_rev_long:
-                # --- GOAL: accumulate and hold LONG inventory ---
-
-                # We fill all sell orders that are below our threshold (fv + 2)
-                for ap, av in self.mkt_sell_orders.items():
-                    if ap <= fv:
-                        self.bid(ap, av, logging = True)
-
-                # ONE-SIDED MM: only place bids so bots can't sell us back to neutral
-                self.bid(self.best_bid + 1, self.max_allowed_buy_volume, logging = True)
- 
- 
-
+        # TREND LEG: buy TREND_ALLOC once at the very first timestamp
+        if not self.trend_bought:
+            # Place a market-aggressive bid to get filled immediately
+            # We bid at best_ask to guarantee a fill
+            self.bid(self.best_ask, self.TREND_ALLOC)
+            self.new_trader_data["root_trend_bought"] = True
         else:
- 
-            if self.spread <= self.SPREAD_THRESHOLD:
-                
-                # If the order is inside a certain range from FV, pick it
-                if self.bid_gap > self.GAP_THRESHOLD and self.best_bid >= int(fv - self.FV_THRESHOLD_CLEARING) and self.initial_position > self.INV_THRESHOLD and 0 <= deviation <= self.ZSCORE_THRESHOLD_CLEARING:
-                    self.ask(self.best_bid, min(self.initial_position, self.mkt_buy_orders[self.best_bid]), logging = True)
- 
-                elif self.ask_gap > self.GAP_THRESHOLD and self.best_ask <= round(fv + self.FV_THRESHOLD_CLEARING) and self.initial_position < -self.INV_THRESHOLD and -self.ZSCORE_THRESHOLD_CLEARING <= deviation <= 0:
-                    self.bid(self.best_ask, min(abs(self.initial_position), self.mkt_sell_orders[self.best_ask]), logging = True)
-                
-                # Otherwise just market make inside the bid ask spread
-                else:
-                    self.bid(self.best_bid + 1, self.max_allowed_buy_volume, logging = True)
-                    self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging = True)
-            
-            # If the spread is wide, do normal market making
-            elif self.spread > self.SPREAD_THRESHOLD:
-                self.bid(self.best_bid + 1, self.max_allowed_buy_volume, logging = True)
-                self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging = True)
- 
- 
-        self.log("POS", self.initial_position)
-        self.log("FV", round(fv, 2))
-        self.log("ZSCORE", round(deviation, 2))
-        self.log("REGIME", "SHORT" if mean_rev_short else ("LONG" if mean_rev_long else "NORMAL"))
-        self.log("BBID", self.best_bid)
-        self.log("BASK", self.best_ask)
+            self.new_trader_data["root_trend_bought"] = True
+
+        # MM LEG: quote around fair value
+        mm_buy_cap, mm_sell_cap = self._mm_capacity()
+
+        # Inventory skew: if we're long, push ask closer and bid further to
+        # offload. If short, do the opposite. Each SKEW_STEP units of imbalance
+        # adds 1 tick of skew.
+        skew = 0
+        if abs(self.mm_position) > self.MAX_SKEW:
+            # How many skew levels are we at?
+            levels = (abs(self.mm_position) - self.MAX_SKEW) // self.SKEW_STEP + 1
+            skew   = int(levels) * (1 if self.mm_position > 0 else -1)
+
+        # Quote 1 tick inside current best bid/ask, skewed by inventory
+        # Also clip to never cross fair value (don't buy above FV or sell below)
+        bid_price = min(self.best_bid + self.QUOTE_OFFSET - skew, int(fv) - 1)
+        ask_price = max(self.best_ask - self.QUOTE_OFFSET - skew, int(fv) + 1)
+
+        # Only quote if there's capacity in the MM book
+        if mm_buy_cap > 0:
+            self.bid(bid_price, mm_buy_cap)
+
+        if mm_sell_cap > 0:
+            self.ask(ask_price, mm_sell_cap)
+
+        # Persist MM position estimate for next iteration
+        # (actual fills are unknown at this point; this is updated via position diff)
+        self.new_trader_data["root_mm_pos"] = (
+            self.initial_position - (self.TREND_ALLOC if self.trend_bought else 0)
+        )
+
+        # ── Logging ──────────────────────────────────────────────────────────
+        self.log("POS",    self.initial_position)
+        self.log("FV",     round(fv, 2))
+        self.log("SKEW",   skew)
+        self.log("MM_POS", self.mm_position)
+        self.log("BBID",   self.best_bid)
+        self.log("BASK",   self.best_ask)
         self.log("SPREAD", self.spread)
-        self.log("BID_GAP", self.bid_gap)
-        self.log("ASK_GAP", self.ask_gap)
-        self.log("MAXBUY", self.max_allowed_buy_volume)
-        self.log("MAXSELL", self.max_allowed_sell_volume)
- 
+
         return {self.name: self.orders}
- 
- 
- 
-# TRADER CLASS
+
+
 class Trader:
- 
+
     def run(self, state: TradingState):
- 
+
         new_trader_data: dict = {}
         prints: dict = {
             "GENERAL": {"t": state.timestamp, "pos": state.position},
         }
- 
-        # Register one TraderClass per product symbol.
-        # Trader.run() instantiates each class only when its symbol
-        # appears in the live order book.
+
         product_traders = {
-            EMERALD_SYMBOL: EmeraldsTrader,
-            TOMATOES_SYMBOL: TomatoesTrader,
+            ROOT_SYMBOL:   RootTrader,
         }
- 
+
         result: dict = {}
         conversions: int = 0
- 
+
         for symbol, TraderClass in product_traders.items():
             if symbol in state.order_depths:
                 try:
@@ -397,16 +314,15 @@ class Trader:
                     result.update(trader.get_orders())
                 except:
                     pass
- 
+
         try:
             final_trader_data = json.dumps(new_trader_data)
         except:
             final_trader_data = ""
- 
+
         try:
             print(json.dumps(prints))
         except:
             pass
- 
+
         return result, conversions, final_trader_data
- 
