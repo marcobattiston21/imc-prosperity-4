@@ -4,9 +4,11 @@ from typing import List
 
 
 ROOT_SYMBOL  = "INTARIAN_PEPPER_ROOT"
+OSMIUM_SYMBOL = "ASH_COATED_OSMIUM"
 
 POS_LIMITS = {
     ROOT_SYMBOL:   80,
+    OSMIUM_SYMBOL: 80,
 }
 
 
@@ -180,7 +182,150 @@ class ProductTrader:
     # This class is here only for the name, it has to be re-defined in each of the subclasses
     def get_orders(self) -> dict:
         return {}
+
+
+class OsmiumTrader(ProductTrader):
+    
+    # KALMAN FILTER PARAMETERS
+    Q = 2.0       # Process noise: how much true FV can move per tick
+    R = 10.0      # Measurement noise: how noisy we think the midpoint is
+    P_INIT = 100.0  # Initial variance (large = we don't trust the initial guess)
+    
+    # Z SCORE PARAMETERS
+    MEAN_REV_LOOKBACK = 100
+    ZSCORE_THRESHOLD = 2
+
  
+    def _kalman_update(self, observation: float) -> tuple[float, float]:
+
+        kf = self.last_traderData.get("ash_kf", None)
+ 
+        if kf is None:
+            # First tick ever → initialize with the current observation
+            x = observation
+            P = self.P_INIT
+
+        else:
+            x_prev = kf["x"]
+            P_prev = kf["P"]
+ 
+            # --- PREDICT ---
+            # State transition is identity (random walk), so x_pred = x_prev
+            x_pred = x_prev
+            P_pred = P_prev + self.Q
+ 
+            # --- UPDATE ---
+            # Innovation (observation residual)
+            y = observation - x_pred
+            # Innovation covariance
+            S = P_pred + self.R
+            # Kalman gain
+            K = P_pred / S
+            # New state estimate
+            x = x_pred + K * y
+            # New estimate variance
+            P = (1 - K) * P_pred
+ 
+        self.new_trader_data["ash_kf"] = {"x": x, "P": P}
+
+        return x, P
+    
+    def _z_score(self, fv: float) -> float:
+
+        history: list = self.last_traderData.get("tom_mr_history", [])
+        history.append(fv)
+        history = history[-self.MEAN_REV_LOOKBACK:]
+        self.new_trader_data["tom_mr_history"] = history
+ 
+        n = len(history)
+        if n < 10:
+            return 0.0
+ 
+        sma = sum(history) / n
+        variance = sum((x - sma) ** 2 for x in history) / n
+        std = variance ** 0.5
+ 
+        if std < 1e-9:
+            return 0.0
+ 
+        return (fv - sma) / std
+
+
+    # Constructor, does the same things as the ProductTrader constructor using the super(), simply restricts to EMERALDS
+    def __init__(self, state: TradingState, prints: dict, new_trader_data: dict):
+        super().__init__(OSMIUM_SYMBOL, state, prints, new_trader_data)
+ 
+    # Function which applies our strategy for Emeralds trading, outputs a dictionary containing the product name and the orders as a list
+    def get_orders(self) -> dict:
+        '''
+        FV Estimation: We use a Kalman Filter on the mid price to filter out all the noise.
+        Order logic: - Normal market making between Z-Score -2 and 2, where it is computed as fv - SMA(100)
+                     - If Z-Score outside these thresholds, we accumulate inventory in the opposite direction
+                     - If there are misplaced bids and asks compared to our FV, we use them to unload some inventory and take free fills
+        '''
+
+        # If there are no bids and no asks, skip the turn --- FIX THIS LATER BY PLACING BIDS AND ASKS AT PREVIOUS PRICES
+        if self.best_ask == None and self.best_bid == None:
+            return {self.name: self.orders}
+
+        # Compute the Fair Value as the output of the Kalman Filter
+        fv, fv_var = self._kalman_update(self.mid_price)
+
+        # Compute Z-Score
+        z_score = self._z_score(fv)
+
+        if -self.ZSCORE_THRESHOLD <= z_score <= self.ZSCORE_THRESHOLD:
+            
+            # Pick mispriced orders both on the buy and sell side
+            if self.best_bid >= fv or self.best_ask <= fv:
+
+                if self.best_bid >= fv:
+
+                    for bid_price, bid_volume in self.mkt_buy_orders.items():
+                        if bid_price >= fv:
+                            self.ask(bid_price, bid_volume, logging = True)
+
+                    self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging = True)
+                
+                elif self.best_ask <= fv:
+                        
+                    for ask_price, ask_volume in self.mkt_sell_orders.items():
+                        if ask_price <= fv:
+                            self.bid(ask_price, ask_volume, logging = True)
+                    
+                    self.bid(self.best_bid + 1, self.max_allowed_buy_volume, logging = True)
+
+            # Normal Market Making
+            else:
+                if self.best_bid is not None:
+                    self.bid(self.best_bid + 1, self.max_allowed_buy_volume, logging = True)
+                if self.best_ask is not None:
+                    self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging = True)
+ 
+        elif z_score > self.ZSCORE_THRESHOLD:
+            
+            if self.best_bid >= fv:
+
+                for bid_price, bid_volume in self.mkt_buy_orders.items():
+                    if bid_price >= fv:
+                        self.ask(bid_price, bid_volume, logging = True)
+
+            elif self.best_ask is not None:
+                self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging = True)
+
+        elif z_score < -self.ZSCORE_THRESHOLD:
+            
+            if self.best_ask <= fv:
+                for ask_price, ask_volume in self.mkt_sell_orders.items():
+                    if ask_price <= fv:
+                        self.bid(ask_price, ask_volume, logging = True)
+
+            elif self.best_bid is not None:
+                self.bid(self.best_bid + 1, self.max_allowed_buy_volume, logging = True)
+
+
+        return {self.name: self.orders}
+
 
 class RootTrader(ProductTrader):
     """
@@ -312,6 +457,7 @@ class Trader:
 
         product_traders = {
             ROOT_SYMBOL:   RootTrader,
+            OSMIUM_SYMBOL: OsmiumTrader,
         }
 
         result: dict = {}
