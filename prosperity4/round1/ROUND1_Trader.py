@@ -119,7 +119,12 @@ class ProductTrader:
     
         best_bid = max(self.mkt_buy_orders, default=None)
         best_ask = min(self.mkt_sell_orders, default=None)
-        mid_price = ( best_bid + best_ask ) / 2
+        if best_bid is None:
+            mid_price = best_ask
+        elif best_ask is None:
+            mid_price = best_bid
+        else:
+            mid_price = ( best_bid + best_ask ) / 2
         return best_bid, mid_price, best_ask
  
     # Function used to recover the second best price of both bid and ask
@@ -193,7 +198,7 @@ class OsmiumTrader(ProductTrader):
     
     # Z SCORE PARAMETERS
     MEAN_REV_LOOKBACK = 100
-    ZSCORE_THRESHOLD = 2
+    ZSCORE_THRESHOLD = 2.5
 
  
     def _kalman_update(self, observation: float) -> tuple[float, float]:
@@ -265,7 +270,7 @@ class OsmiumTrader(ProductTrader):
         '''
 
         # If there are no bids and no asks, skip the turn --- FIX THIS LATER BY PLACING BIDS AND ASKS AT PREVIOUS PRICES
-        if self.best_ask == None and self.best_bid == None:
+        if self.best_ask is None and self.best_bid is None:
             return {self.name: self.orders}
 
         # Compute the Fair Value as the output of the Kalman Filter
@@ -277,51 +282,65 @@ class OsmiumTrader(ProductTrader):
         if -self.ZSCORE_THRESHOLD <= z_score <= self.ZSCORE_THRESHOLD:
             
             # Pick mispriced orders both on the buy and sell side
-            if self.best_bid >= fv or self.best_ask <= fv:
+            if self.best_bid >= (fv - 1) or self.best_ask <= (fv + 1):
 
-                if self.best_bid >= fv:
+                if self.best_bid >= (fv - 1):
 
                     for bid_price, bid_volume in self.mkt_buy_orders.items():
-                        if bid_price >= fv:
+                        if bid_price >= (fv - 1):
                             self.ask(bid_price, bid_volume, logging = True)
-
-                    self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging = True)
+                    if self.best_ask is not None:
+                        self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging = True)
+                    elif self.best_ask is None:
+                        self.ask(fv + 8, self.max_allowed_sell_volume, logging = True)
                 
-                elif self.best_ask <= fv:
+                if self.best_ask <= (fv + 1):
                         
                     for ask_price, ask_volume in self.mkt_sell_orders.items():
-                        if ask_price <= fv:
+                        if ask_price <= (fv + 1):
                             self.bid(ask_price, ask_volume, logging = True)
-                    
-                    self.bid(self.best_bid + 1, self.max_allowed_buy_volume, logging = True)
+                    if self.best_bid is not None:
+                        self.bid(self.best_bid + 1, self.max_allowed_buy_volume, logging = True)
+                    elif self.best_bid is None:
+                        self.bid(fv - 8, self.max_allowed_buy_volume, logging = True)
 
             # Normal Market Making
             else:
                 if self.best_bid is not None:
                     self.bid(self.best_bid + 1, self.max_allowed_buy_volume, logging = True)
+                elif self.best_bid is None:
+                    self.bid(fv - 8, self.max_allowed_buy_volume, logging = True)
                 if self.best_ask is not None:
                     self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging = True)
+                elif self.best_ask is None:
+                    self.ask(fv + 8, self.max_allowed_sell_volume, logging = True)
  
         elif z_score > self.ZSCORE_THRESHOLD:
             
-            if self.best_bid >= fv:
+            if self.best_bid >= (fv - 1):
 
                 for bid_price, bid_volume in self.mkt_buy_orders.items():
-                    if bid_price >= fv:
+                    if bid_price >= (fv - 1):
                         self.ask(bid_price, bid_volume, logging = True)
 
-            elif self.best_ask is not None:
+            if self.best_ask is not None:
                 self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging = True)
+            
+            elif self.best_ask is None:
+                self.ask(fv + 8, self.max_allowed_sell_volume, logging = True)
 
         elif z_score < -self.ZSCORE_THRESHOLD:
             
-            if self.best_ask <= fv:
+            if self.best_ask <= (fv + 1):
                 for ask_price, ask_volume in self.mkt_sell_orders.items():
-                    if ask_price <= fv:
+                    if ask_price <= (fv + 1):
                         self.bid(ask_price, ask_volume, logging = True)
 
-            elif self.best_bid is not None:
+            if self.best_bid is not None:
                 self.bid(self.best_bid + 1, self.max_allowed_buy_volume, logging = True)
+            
+            elif self.best_bid is None:
+                self.bid(fv - 8, self.max_allowed_buy_volume, logging = True)
 
 
         return {self.name: self.orders}
@@ -335,10 +354,10 @@ class RootTrader(ProductTrader):
     Residuals mean-revert with half-life < 1 timestamp, so there's no time to
     trade mean-reversion directly. Instead we:
 
-    1. TREND LEG  – reserve TREND_ALLOC units as a permanent long from t=0.
+    1. TREND LEG  - reserve TREND_ALLOC units as a permanent long from t=0.
                     Buy it immediately and never sell until end of day.
 
-    2. MM LEG     – use the remaining FLUCT_ALLOC units to market-make around
+    2. MM LEG     - use the remaining FLUCT_ALLOC units to market-make around
                     the rolling fair value. The spread is ~13 ticks wide, so
                     quoting 1 tick inside best bid/ask captures ~5-6 ticks per
                     round trip while staying close to fair value.
@@ -350,12 +369,12 @@ class RootTrader(ProductTrader):
     # INTERCEPT = 13000.0048      # from regression
 
     # Position split (out of 80 limit)
-    TREND_ALLOC = 48            # held as permanent long
-    FLUCT_ALLOC = 32            # available for market making
+    TREND_ALLOC = 80            # held as permanent long
+    FLUCT_ALLOC = 0            # available for market making
 
     # Market making params (tuned to the ~13 tick spread, 6.5 tick depth)
     QUOTE_OFFSET   = 1          # quote 1 tick inside best bid/ask
-    MAX_SKEW       = 28         # start skewing quotes when abs(mm_pos) > this
+    MAX_SKEW       = 12         # start skewing quotes when abs(mm_pos) > this
     SKEW_STEP      = 1          # extra ticks added per skew level
 
     def __init__(self, state: TradingState, prints: dict, new_trader_data: dict):
@@ -444,6 +463,7 @@ class RootTrader(ProductTrader):
         self.log("SPREAD", self.spread)
 
         return {self.name: self.orders}
+
 
 
 class Trader:
