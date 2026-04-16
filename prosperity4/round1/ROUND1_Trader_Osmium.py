@@ -196,11 +196,10 @@ class OsmiumTrader(ProductTrader):
     R = 10.0      # Measurement noise: how noisy we think the midpoint is
     P_INIT = 100.0  # Initial variance (large = we don't trust the initial guess)
     
-    # Z SCORE AND OTHER THRESHOLD PARAMETERS
-    MEAN_REV_LOOKBACK = 1000
+    # Z SCORE PARAMETERS
+    MEAN_REV_LOOKBACK = 100
     ZSCORE_THRESHOLD = 2
-    FV_TAKING_THRESHOLD = 2
-    HALF_SPREAD = 8
+
  
     def _kalman_update(self, observation: float) -> tuple[float, float]:
 
@@ -280,84 +279,54 @@ class OsmiumTrader(ProductTrader):
         # Compute Z-Score
         z_score = self._z_score(fv)
 
-
-        # If we're between -2 and +2 ZSCORE, it means we are around the long mean, so we just do normal Market Making and pick misplaced orders
         if -self.ZSCORE_THRESHOLD <= z_score <= self.ZSCORE_THRESHOLD:
             
             # Pick mispriced orders both on the buy and sell side
-            if self.best_bid >= fv -self.FV_TAKING_THRESHOLD or self.best_ask <= fv + self.FV_TAKING_THRESHOLD:
+            if self.best_bid >= fv or self.best_ask <= fv:
 
-                if self.best_bid >= fv - self.FV_TAKING_THRESHOLD:
+                if self.best_bid >= fv:
 
                     for bid_price, bid_volume in self.mkt_buy_orders.items():
-                        if bid_price >= fv - self.FV_TAKING_THRESHOLD:
+                        if bid_price >= fv:
                             self.ask(bid_price, bid_volume, logging = True)
 
-                    # Reposition the orders at best ask - 1
                     self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging = True)
-                    
-                    # Place a bid at fv - 7 (usually spread is around 16/17, so we place it there in case someone is willing to sell to us)
-                    self.bid(fv - self.HALF_SPREAD + 1, self.max_allowed_buy_volume, logging = True)
                 
-                elif self.best_ask <= fv + self.FV_TAKING_THRESHOLD:
+                elif self.best_ask <= fv:
                         
                     for ask_price, ask_volume in self.mkt_sell_orders.items():
-                        if ask_price <= fv + self.FV_TAKING_THRESHOLD:
+                        if ask_price <= fv:
                             self.bid(ask_price, ask_volume, logging = True)
                     
-                    # Reposition the orders at best bid + 1
                     self.bid(self.best_bid + 1, self.max_allowed_buy_volume, logging = True)
-                    
-                    # Place an ask at fv + 7 in case someone is willing to buy us
-                    self.ask(fv + self.HALF_SPREAD - 1, self.max_allowed_sell_volume, logging = True)
 
             # Normal Market Making
             else:
-                # If there's a best bid, place right above it, otherwise place at FV - 7
                 if self.best_bid is not None:
                     self.bid(self.best_bid + 1, self.max_allowed_buy_volume, logging = True)
-                else:
-                    self.bid(fv - self.HALF_SPREAD + 1, self.max_allowed_buy_volume, logging = True)
-                
-                # If there's a best ask, place right below it, otherwise place at FV + 7
                 if self.best_ask is not None:
                     self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging = True)
-                else:
-                    self.ask(fv + self.HALF_SPREAD - 1, self.max_allowed_sell_volume, logging = True)
-
-        # If we are above 2 Z Score, it means we are likely to mean revert back to the long term mean, so we want to accumulate short positions
+ 
         elif z_score > self.ZSCORE_THRESHOLD:
             
-            # If there're bids above FV - THRESHOLD, we take them both to unload our long inventory and to load up on shorts
-            if self.best_bid >= fv - self.FV_TAKING_THRESHOLD:
-                
-                # Check in all the orders
+            if self.best_bid >= fv:
+
                 for bid_price, bid_volume in self.mkt_buy_orders.items():
-                    if bid_price >= fv - self.FV_TAKING_THRESHOLD:
+                    if bid_price >= fv:
                         self.ask(bid_price, bid_volume, logging = True)
 
-            # If there's an ask order we place an ask right below it, otherwise just use the FV + 7
-            if self.best_ask is not None:
+            elif self.best_ask is not None:
                 self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging = True)
-            else:
-                self.ask(fv + self.HALF_SPREAD - 1, self.max_allowed_sell_volume, logging = True)
 
-        # If we are below -2 Z Score, it means we are likely to mean revert back to the long term mean, so we want to accumulate long positions
         elif z_score < -self.ZSCORE_THRESHOLD:
             
-            # If there are asks below FV + THRESHOLD, we take them both to unload our short inventory and to build long positions
             if self.best_ask <= fv:
-
-                # Check in all the orders
                 for ask_price, ask_volume in self.mkt_sell_orders.items():
-                    if ask_price <= fv + self.FV_TAKING_THRESHOLD:
+                    if ask_price <= fv:
                         self.bid(ask_price, ask_volume, logging = True)
 
-            # If there's a bid order, we place right above it, otherwise just use FV - 7
-            if self.best_bid is not None:
+            elif self.best_bid is not None:
                 self.bid(self.best_bid + 1, self.max_allowed_buy_volume, logging = True)
-            else:
-                self.bid(fv - self.HALF_SPREAD + 1, self.max_allowed_buy_volume, logging = True)
 
 
         return {self.name: self.orders}
@@ -402,4 +371,3 @@ class Trader:
             pass
  
         return result, conversions, final_trader_data
- 
