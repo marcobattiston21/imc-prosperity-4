@@ -209,14 +209,9 @@ class RootTrader(ProductTrader):
     SLOPE     = 0.001           # price units per timestamp
     # INTERCEPT = 13000.0048      # from regression
 
-    # Position split (out of 80 limit)
-    TREND_ALLOC = 80            # held as permanent long
-    FLUCT_ALLOC = 0            # available for market making
 
-    # Market making params (tuned to the ~13 tick spread, 6.5 tick depth)
-    QUOTE_OFFSET   = 1          # quote 1 tick inside best bid/ask
-    MAX_SKEW       = 12         # start skewing quotes when abs(mm_pos) > this
-    SKEW_STEP      = 1          # extra ticks added per skew level
+
+   
 
     def __init__(self, state: TradingState, prints: dict, new_trader_data: dict):
         super().__init__(ROOT_SYMBOL, state, prints, new_trader_data)
@@ -245,13 +240,51 @@ class RootTrader(ProductTrader):
 
 
     def get_orders(self) -> dict:
-         
+
+        START = self.last_traderData.get("START", False)
+
+        fv = self._fair_value()
+
+        if fv == None:
+            return {self.name: self.orders} 
+        else:
+            if self.initial_position == 80:
+                START=True
+                
+            if START == False: # starting cycle 
+                self.bid(self.best_ask, min(self.max_allowed_buy_volume, self.mkt_sell_orders[self.best_ask]))
+                if self.best_bid is not None:
+                    self.bid(self.best_bid +1 , self.max_allowed_buy_volume)
+                else:
+                    self.bid(fv -7,self.max_allowed_buy_volume)
+                return {self.name: self.orders}
+            else:
+                if self.initial_position < 80:
+                    if self.best_bid >= fv:
+                        for bid_price, bid_volume in self.mkt_buy_orders.items():
+                            if bid_price >= (fv):
+                                self.ask(bid_price, bid_volume, logging = True)
+                        if self.second_best_bid is not None:
+                            self.bid(self.second_best_bid + 1 , self.max_allowed_buy_volume)
+                        else:
+                            self.bid(fv -7,self.max_allowed_buy_volume)
+                    elif self.best_bid is not None:
+                        self.bid(self.best_bid +1 , self.max_allowed_buy_volume)
+                    else:
+                        self.bid(fv -7,self.max_allowed_buy_volume)
+                else:
+                    if self.best_ask is not None:
+                        self.ask(self.best_ask -1 , self.max_allowed_sell_volume)
+                    else:
+                        self.ask(fv + 7, self.max_allowed_sell_volume)
+
+        self.new_trader_data["START"] = START
+
+
 
         # Logging
         self.log("POS",    self.initial_position)
         self.log("FV",     round(fv, 2))
-        self.log("SKEW",   skew)
-        self.log("MM_POS", self.mm_position)
         self.log("BBID",   self.best_bid)
         self.log("BASK",   self.best_ask)
         self.log("SPREAD", self.spread)
