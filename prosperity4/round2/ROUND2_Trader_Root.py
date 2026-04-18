@@ -36,7 +36,7 @@ class ProductTrader:
         
         # Recover the current position based on last iteration
         self.initial_position: int = self.state.position.get(self.name, 0)
-        self.expected_position: int = self.initial_position
+        # self.expected_position: int = self.initial_position
  
         # Recover the order book data using the _parse_order_depth function, divides into mkt buy orders and sell orders dictionaries
         self.mkt_buy_orders, self.mkt_sell_orders = self._parse_order_depth()
@@ -117,7 +117,12 @@ class ProductTrader:
     
         best_bid = max(self.mkt_buy_orders, default=None)
         best_ask = min(self.mkt_sell_orders, default=None)
-        mid_price = ( best_bid + best_ask ) / 2
+        if best_bid is None:
+            mid_price = best_ask
+        elif best_ask is None:
+            mid_price = best_bid
+        else:
+            mid_price = ( best_bid + best_ask ) / 2
         return best_bid, mid_price, best_ask
  
     # Function used to recover the second best price of both bid and ask
@@ -215,79 +220,32 @@ class RootTrader(ProductTrader):
 
     def __init__(self, state: TradingState, prints: dict, new_trader_data: dict):
         super().__init__(ROOT_SYMBOL, state, prints, new_trader_data)
-
-        # Retrieve persistent state from previous iteration
-        self.trend_bought: bool = self.last_traderData.get("root_trend_bought", False)
-        self.mm_position:  int  = self.last_traderData.get("root_mm_pos", 0)
-
-        self.INTERCEPT = self._get_best_bid_ask()[1]
-        # # Set intercept dynamically as the mid price of the first timestamp
-        # if "root_intercept" in self.last_traderData:
-        #     self.INTERCEPT = self.last_traderData["root_intercept"]
-        # else:
-        #     # Calculate what the intercept was originally based on the first observed price
-        #     self.INTERCEPT = self.mid_price - (self.SLOPE * self.state.timestamp)
         
-        # self.new_trader_data["root_intercept"] = self.INTERCEPT
+        self.INTERCEPT = self._get_intercept()
+
+    # setting intercept 
+    def _get_intercept(self) -> float:
+
+        INTERCEPT = self.last_traderData.get("intercept", None)
+        
+        if INTERCEPT == None and self.spread >= 12:
+            
+            INTERCEPT = self.mid_price - self.SLOPE * self.state.timestamp
+
+        self.new_trader_data["intercept"] = INTERCEPT
+        
+        return INTERCEPT  
+
 
     def _fair_value(self) -> float:
         # Rolling fair value: intercept + slope × current timestamp
-        return self.INTERCEPT + self.SLOPE * self.state.timestamp
+        fv = self.INTERCEPT + self.SLOPE * self.state.timestamp if self.INTERCEPT is not None else None
+        return fv
 
-    def _mm_capacity(self) -> tuple[int, int]:
-        """
-        The MM book can go from -FLUCT_ALLOC to +FLUCT_ALLOC around neutral.
-        Returns (max_mm_buy, max_mm_sell) based on current mm_position.
-        """
-        max_mm_buy  = self.FLUCT_ALLOC - self.mm_position
-        max_mm_sell = self.FLUCT_ALLOC + self.mm_position
-        return max(max_mm_buy, 0), max(max_mm_sell, 0)
+
 
     def get_orders(self) -> dict:
-
-        if self.best_bid is None or self.best_ask is None:
-            return {self.name: self.orders}
-
-        fv = self._fair_value()
-
-        # TREND LEG: buy TREND_ALLOC once at the very first timestamp
-        if not self.trend_bought:
-            # Place a market-aggressive bid to get filled immediately
-            # We bid at best_ask to guarantee a fill
-            self.bid(self.best_ask, self.TREND_ALLOC)
-            self.new_trader_data["root_trend_bought"] = True
-        else:
-            self.new_trader_data["root_trend_bought"] = True
-
-        # MM LEG: quote around fair value
-        mm_buy_cap, mm_sell_cap = self._mm_capacity()
-
-        # Inventory skew: if we're long, push ask closer and bid further to
-        # offload. If short, do the opposite. Each SKEW_STEP units of imbalance
-        # adds 1 tick of skew.
-        skew = 0
-        if abs(self.mm_position) > self.MAX_SKEW:
-            # How many skew levels are we at?
-            levels = (abs(self.mm_position) - self.MAX_SKEW) // self.SKEW_STEP + 1
-            skew   = int(levels) * (1 if self.mm_position > 0 else -1)
-
-        # Quote 1 tick inside current best bid/ask, skewed by inventory
-        # Also clip to never cross fair value (don't buy above FV or sell below)
-        bid_price = min(self.best_bid + self.QUOTE_OFFSET - skew, int(fv) - 1)
-        ask_price = max(self.best_ask - self.QUOTE_OFFSET - skew, int(fv) + 1)
-
-        # Only quote if there's capacity in the MM book
-        if mm_buy_cap > 0:
-            self.bid(bid_price, mm_buy_cap)
-
-        if mm_sell_cap > 0:
-            self.ask(ask_price, mm_sell_cap)
-
-        # Persist MM position estimate for next iteration
-        # (actual fills are unknown at this point; this is updated via position diff)
-        self.new_trader_data["root_mm_pos"] = (
-            self.initial_position - (self.TREND_ALLOC if self.trend_bought else 0)
-        )
+         
 
         # Logging
         self.log("POS",    self.initial_position)
