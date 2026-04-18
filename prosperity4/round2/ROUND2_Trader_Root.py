@@ -56,8 +56,7 @@ class ProductTrader:
         
  
         # Compute the spread
-        try: self.spread = self.best_ask - self.best_bid
-        except: pass
+        self.spread = self.best_ask - self.best_bid if self.best_ask is not None and self.best_bid is not None else None
  
  
     # Function used to recover all the data from the past iteration
@@ -188,26 +187,10 @@ class ProductTrader:
  
 
 class RootTrader(ProductTrader):
-    """
-    Strategy for INTARIAN_PEPPER_ROOT
-    ─────────────────────────────────
-    The asset follows an almost perfect linear trend (R²=0.9999, slope=0.001).
-    Residuals mean-revert with half-life < 1 timestamp, so there's no time to
-    trade mean-reversion directly. Instead we:
 
-    1. TREND LEG  - reserve TREND_ALLOC units as a permanent long from t=0.
-                    Buy it immediately and never sell until end of day.
-
-    2. MM LEG     - use the remaining FLUCT_ALLOC units to market-make around
-                    the rolling fair value. The spread is ~13 ticks wide, so
-                    quoting 1 tick inside best bid/ask captures ~5-6 ticks per
-                    round trip while staying close to fair value.
-                    We skew quotes based on current inventory to stay neutral.
-    """
 
     # Linear model parameters (from analysis)
     SLOPE     = 0.001           # price units per timestamp
-    # INTERCEPT = 13000.0048      # from regression
 
 
 
@@ -223,7 +206,7 @@ class RootTrader(ProductTrader):
 
         INTERCEPT = self.last_traderData.get("intercept", None)
         
-        if INTERCEPT == None and self.spread >= 12:
+        if INTERCEPT == None and self.spread is not None and self.spread >= 12:
             
             INTERCEPT = self.mid_price - self.SLOPE * self.state.timestamp
 
@@ -251,8 +234,9 @@ class RootTrader(ProductTrader):
             if self.initial_position == 80:
                 START=True
                 
-            if START == False: # starting cycle 
-                self.bid(self.best_ask, min(self.max_allowed_buy_volume, self.mkt_sell_orders[self.best_ask]))
+            if START == False: # starting cycle
+                if self.best_ask is not None:
+                    self.bid(self.best_ask, min(self.max_allowed_buy_volume, self.mkt_sell_orders[self.best_ask]))
                 if self.best_bid is not None:
                     self.bid(self.best_bid +1 , self.max_allowed_buy_volume)
                 else:
@@ -260,7 +244,7 @@ class RootTrader(ProductTrader):
                 return {self.name: self.orders}
             else:
                 if self.initial_position < 80:
-                    if self.best_bid >= fv:
+                    if self.best_bid is not None and self.best_bid >= fv:
                         for bid_price, bid_volume in self.mkt_buy_orders.items():
                             if bid_price >= (fv):
                                 self.ask(bid_price, bid_volume, logging = True)
