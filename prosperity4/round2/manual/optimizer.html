@@ -1,0 +1,384 @@
+
+<style>
+* { box-sizing: border-box; }
+.card { background: var(--color-background-primary); border: 0.5px solid var(--color-border-tertiary); border-radius: var(--border-radius-lg); padding: 1rem 1.25rem; margin-bottom: 1rem; }
+.sec-label { font-size: 13px; font-weight: 500; color: var(--color-text-secondary); margin: 0 0 10px; }
+.metric-card { background: var(--color-background-secondary); border-radius: var(--border-radius-md); padding: 0.85rem 1rem; }
+.metric-label { font-size: 12px; color: var(--color-text-secondary); margin: 0 0 3px; }
+.metric-value { font-size: 20px; font-weight: 500; color: var(--color-text-primary); margin: 0; }
+.metric-sub { font-size: 11px; color: var(--color-text-tertiary); margin: 2px 0 0; }
+.metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-bottom: 1rem; }
+.bar-track { height: 7px; background: var(--color-background-secondary); border-radius: 4px; overflow: hidden; margin-top: 3px; }
+.bar-fill { height: 100%; border-radius: 4px; transition: width 0.25s; }
+.label-row { display: flex; justify-content: space-between; font-size: 12px; color: var(--color-text-secondary); margin-bottom: 1px; }
+.belief-row { display: grid; grid-template-columns: 90px 1fr 80px 28px; gap: 8px; align-items: center; margin-bottom: 6px; }
+.belief-row input[type=number] { font-size: 13px; text-align: right; width: 100%; }
+.belief-row input[type=range] { width: 100%; }
+.add-btn { font-size: 12px; padding: 4px 10px; cursor: pointer; }
+.del-btn { font-size: 14px; color: var(--color-text-danger); cursor: pointer; background: none; border: none; padding: 0; line-height: 1; }
+.highlight-card { background: var(--color-background-success); border: 1.5px solid var(--color-border-success); border-radius: var(--border-radius-lg); padding: 1rem 1.25rem; margin-bottom: 1rem; }
+.pill { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: var(--border-radius-md); background: var(--color-background-info); color: var(--color-text-info); margin-left: 6px; vertical-align: middle; }
+.dist-bar-wrap { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.dist-label { font-size: 11px; color: var(--color-text-secondary); width: 28px; text-align: right; flex-shrink: 0; }
+.dist-bar { height: 6px; background: #378ADD; border-radius: 3px; min-width: 2px; }
+.dist-count { font-size: 11px; color: var(--color-text-tertiary); width: 46px; flex-shrink: 0; }
+.total-warn { font-size: 12px; color: var(--color-text-warning); margin-top: 6px; }
+</style>
+
+<h2 class="sr-only">Dashboard ottimizzazione Invest & Expand con beliefs sulla distribuzione speed degli avversari.</h2>
+
+<div style="padding: 0.5rem 0 1.5rem;">
+
+<div class="card">
+  <div class="sec-label">Beliefs sulla distribuzione speed avversari (totale: <span id="total-teams-lbl">0</span> / 22000)</div>
+  <div style="display: grid; grid-template-columns: 90px 1fr 80px 28px; gap: 8px; margin-bottom: 4px;">
+    <span style="font-size: 11px; color: var(--color-text-tertiary);">Speed bet</span>
+    <span style="font-size: 11px; color: var(--color-text-tertiary);">Slider</span>
+    <span style="font-size: 11px; color: var(--color-text-tertiary); text-align: right;">N teams</span>
+    <span></span>
+  </div>
+  <div id="beliefs-container"></div>
+  <div id="total-warn" class="total-warn" style="display:none;"></div>
+  <button class="add-btn" onclick="addBelief()" style="margin-top:6px;">+ aggiungi gruppo</button>
+</div>
+
+<div class="card">
+  <div class="sec-label">Distribuzione speed avversari</div>
+  <div id="dist-chart" style="max-height: 160px; overflow-y: auto;"></div>
+</div>
+
+<div class="highlight-card">
+  <div style="font-size: 13px; font-weight: 500; color: var(--color-text-success); margin-bottom: 10px;">
+    Raccomandazione ottimale
+    <span id="opt-note" class="pill">—</span>
+  </div>
+  <div class="metrics-grid">
+    <div class="metric-card">
+      <p class="metric-label">Speed ottimale</p>
+      <p class="metric-value" id="opt-speed">—</p>
+      <p class="metric-sub" id="opt-mult">mult: —</p>
+    </div>
+    <div class="metric-card">
+      <p class="metric-label">Research</p>
+      <p class="metric-value" id="opt-res-pct">—</p>
+      <p class="metric-sub" id="opt-res-val">output: —</p>
+    </div>
+    <div class="metric-card">
+      <p class="metric-label">Scale</p>
+      <p class="metric-value" id="opt-scl-pct">—</p>
+      <p class="metric-sub" id="opt-scl-val">output: —</p>
+    </div>
+    <div class="metric-card">
+      <p class="metric-label">Net PnL</p>
+      <p class="metric-value" id="opt-pnl">—</p>
+      <p class="metric-sub" id="opt-gross">gross: —</p>
+    </div>
+    <div class="metric-card">
+      <p class="metric-label">Rank</p>
+      <p class="metric-value" id="opt-rank">—</p>
+      <p class="metric-sub" id="opt-rank-of">su — teams</p>
+    </div>
+    <div class="metric-card">
+      <p class="metric-label">Budget usato</p>
+      <p class="metric-value" id="opt-budget">—</p>
+      <p class="metric-sub" id="opt-unspent">unspent: —</p>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="sec-label">PnL al variare dello speed che scommettiamo</div>
+  <div style="position: relative; width: 100%; height: 200px;">
+    <canvas id="pnlChart" role="img" aria-label="Curva PnL netto al variare dell'allocazione speed nostra, dati i beliefs sugli avversari">Aggiorna i beliefs per vedere la curva.</canvas>
+  </div>
+</div>
+
+<div class="card">
+  <div class="sec-label">Confronto manuale</div>
+  <div style="display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin-bottom: 12px;">
+    <div style="display: flex; align-items: center; gap: 8px; flex: 1; min-width: 200px;">
+      <label style="font-size: 13px; color: var(--color-text-secondary); white-space: nowrap;">Nostro speed</label>
+      <input type="range" id="manual-slider" min="0" max="100" value="20" step="1" style="flex:1;" />
+      <span id="manual-slider-lbl" style="font-size: 13px; font-weight: 500; min-width: 30px;">20%</span>
+    </div>
+  </div>
+  <div class="metrics-grid" id="manual-metrics"></div>
+  <div style="margin-top: 10px;">
+    <div class="label-row"><span>Research</span><span id="m-bar-res-lbl">—</span></div>
+    <div class="bar-track"><div class="bar-fill" id="m-bar-res" style="background: #378ADD;"></div></div>
+    <div class="label-row" style="margin-top:6px;"><span>Scale</span><span id="m-bar-scl-lbl">—</span></div>
+    <div class="bar-track"><div class="bar-fill" id="m-bar-scl" style="background: #1D9E75;"></div></div>
+    <div class="label-row" style="margin-top:6px;"><span>Speed</span><span id="m-bar-spd-lbl">—</span></div>
+    <div class="bar-track"><div class="bar-fill" id="m-bar-spd" style="background: #BA7517;"></div></div>
+  </div>
+</div>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+const BUDGET = 50000;
+const LOG101 = Math.log(101);
+const TOTAL_OPPONENTS = 22000;
+
+function resFn(x) { return x <= 0 ? 0 : 200000 * Math.log(1 + x) / LOG101; }
+function sclFn(x) { return 7 * x / 100; }
+function fmt(n) { return Math.round(n).toLocaleString('en-US'); }
+
+let beliefs = [
+  { speed: 0, count: 2000 },
+  { speed: 10, count: 3000 },
+  { speed: 20, count: 4000 },
+  { speed: 30, count: 5000 },
+  { speed: 50, count: 4000 },
+  { speed: 70, count: 2000 },
+  { speed: 100, count: 2000 },
+];
+
+function computeMultiplier(mySpeed, oppList) {
+  const allSpeeds = [...oppList, mySpeed];
+  const n = allSpeeds.length;
+  if (n === 1) return 0.9;
+  const sorted = [...allSpeeds].sort((a, b) => b - a);
+  const ranks = allSpeeds.map(s => {
+    const rank = sorted.findIndex(v => v === s) + 1;
+    return rank;
+  });
+  const myRank = ranks[ranks.length - 1];
+  const mult = 0.9 + (0.1 - 0.9) * (myRank - 1) / (n - 1);
+  return Math.floor(mult * 100) / 100;
+}
+
+function buildOppList() {
+  const list = [];
+  for (const b of beliefs) {
+    for (let i = 0; i < b.count; i++) list.push(b.speed);
+  }
+  return list;
+}
+
+function computeMultiplierFast(mySpeed, oppCounts) {
+  let totalBelow = 0, totalEqual = 0, totalAbove = 0;
+  for (const [sp, cnt] of oppCounts) {
+    if (sp > mySpeed) totalAbove += cnt;
+    else if (sp === mySpeed) totalEqual += cnt;
+    else totalBelow += cnt;
+  }
+  const n = totalAbove + totalEqual + totalBelow + 1;
+  const myRank = totalAbove + 1;
+  if (n === 1) return 0.9;
+  const raw = 0.9 + (0.1 - 0.9) * (myRank - 1) / (n - 1);
+  return Math.floor(raw * 100) / 100;
+}
+
+function getOppCounts() {
+  return beliefs.filter(b => b.count > 0).map(b => [b.speed, b.count]);
+}
+
+function computeRankInfo(mySpeed, oppCounts) {
+  let totalAbove = 0, totalEqual = 0, total = 0;
+  for (const [sp, cnt] of oppCounts) {
+    total += cnt;
+    if (sp > mySpeed) totalAbove += cnt;
+    else if (sp === mySpeed) totalEqual += cnt;
+  }
+  const n = total + 1;
+  const myRank = totalAbove + 1;
+  return { rank: myRank, total: n };
+}
+
+function optRS(speedPct, mult) {
+  const rem = 100 - speedPct;
+  if (rem <= 0) return { r: 0, s: 0, pnl: -speedPct / 100 * BUDGET };
+  let best = -Infinity, br = 0, bs = 0;
+  for (let r = 0; r <= rem; r++) {
+    const s = rem - r;
+    const gross = resFn(r) * sclFn(s) * mult;
+    const cost = (rem + speedPct) / 100 * BUDGET;
+    const net = gross - cost;
+    if (net > best) { best = net; br = r; bs = s; }
+  }
+  return { r: br, s: bs, pnl: best };
+}
+
+function fullOpt(oppCounts) {
+  let bestPnl = -Infinity, bestSp = 0, bestR = 0, bestS = 0, bestMult = 0.1;
+  for (let sp = 0; sp <= 100; sp++) {
+    const mult = computeMultiplierFast(sp, oppCounts);
+    const { r, s, pnl } = optRS(sp, mult);
+    if (pnl > bestPnl) { bestPnl = pnl; bestSp = sp; bestR = r; bestS = s; bestMult = mult; }
+  }
+  return { sp: bestSp, r: bestR, s: bestS, pnl: bestPnl, mult: bestMult };
+}
+
+let pnlChart = null;
+
+function renderBeliefs() {
+  const c = document.getElementById('beliefs-container');
+  c.innerHTML = '';
+  let total = 0;
+  beliefs.forEach((b, i) => {
+    total += b.count;
+    const row = document.createElement('div');
+    row.className = 'belief-row';
+    row.innerHTML = `
+      <input type="number" min="0" max="100" step="1" value="${b.speed}" style="font-size:13px;text-align:right;width:100%;" oninput="beliefs[${i}].speed=Math.min(100,Math.max(0,parseInt(this.value)||0));update();" />
+      <input type="range" min="0" max="22000" step="100" value="${b.count}" oninput="beliefs[${i}].count=parseInt(this.value);this.nextElementSibling.value=this.value;update();" />
+      <input type="number" min="0" max="22000" step="100" value="${b.count}" style="font-size:13px;text-align:right;width:100%;" oninput="beliefs[${i}].count=parseInt(this.value)||0;this.previousElementSibling.value=this.value;update();" />
+      <button class="del-btn" onclick="beliefs.splice(${i},1);renderBeliefs();update();">×</button>
+    `;
+    c.appendChild(row);
+  });
+  document.getElementById('total-teams-lbl').textContent = total.toLocaleString('en-US');
+  const warn = document.getElementById('total-warn');
+  if (total > TOTAL_OPPONENTS) {
+    warn.textContent = `Attenzione: totale ${total.toLocaleString()} supera i 22.000 avversari.`;
+    warn.style.display = 'block';
+  } else {
+    warn.style.display = 'none';
+  }
+}
+
+function addBelief() {
+  beliefs.push({ speed: 50, count: 1000 });
+  renderBeliefs();
+  update();
+}
+
+function renderDist(oppCounts) {
+  const el = document.getElementById('dist-chart');
+  el.innerHTML = '';
+  const maxCount = Math.max(...oppCounts.map(([, c]) => c), 1);
+  const sorted = [...oppCounts].sort((a, b) => a[0] - b[0]);
+  for (const [sp, cnt] of sorted) {
+    const pct = Math.round(cnt / maxCount * 100);
+    const wrap = document.createElement('div');
+    wrap.className = 'dist-bar-wrap';
+    wrap.innerHTML = `<span class="dist-label">${sp}%</span><div class="dist-bar" style="width:${Math.max(pct, 1)}%;"></div><span class="dist-count">${cnt.toLocaleString()}</span>`;
+    el.appendChild(wrap);
+  }
+}
+
+function updateChart(oppCounts) {
+  const labels = Array.from({length: 101}, (_, i) => i);
+  const data = labels.map(sp => {
+    const mult = computeMultiplierFast(sp, oppCounts);
+    const { pnl } = optRS(sp, mult);
+    return pnl;
+  });
+
+  if (pnlChart) {
+    pnlChart.data.datasets[0].data = data;
+    pnlChart.update('none');
+  } else {
+    const ctx = document.getElementById('pnlChart');
+    pnlChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [{
+          label: 'Net PnL',
+          data,
+          borderColor: '#378ADD',
+          backgroundColor: 'transparent',
+          borderWidth: 2,
+          pointRadius: 0,
+          tension: 0.3,
+        }, {
+          label: 'Marker',
+          data: [],
+          borderColor: '#D85A30',
+          backgroundColor: 'rgba(216,90,48,0.15)',
+          borderWidth: 0,
+          pointRadius: 6,
+          pointStyle: 'circle',
+          showLine: false,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: {
+            title: items => `Speed: ${items[0].label}%`,
+            label: item => item.datasetIndex === 0 ? ` PnL: ${fmt(item.raw)}` : ` Ottimo: ${fmt(item.raw)}`
+          }}
+        },
+        scales: {
+          x: { title: { display: true, text: 'Speed %', font: { size: 11 } }, ticks: { maxTicksLimit: 11, font: { size: 10 } } },
+          y: { title: { display: true, text: 'Net PnL', font: { size: 11 } }, ticks: { font: { size: 10 }, callback: v => fmt(v) } }
+        }
+      }
+    });
+  }
+  return data;
+}
+
+function update() {
+  renderBeliefs();
+  const oppCounts = getOppCounts();
+  renderDist(oppCounts);
+
+  const data = updateChart(oppCounts);
+  const opt = fullOpt(oppCounts);
+
+  pnlChart.data.datasets[1].data = [{ x: opt.sp, y: opt.pnl }];
+  pnlChart.update('none');
+
+  const rankInfo = computeRankInfo(opt.sp, oppCounts);
+  const gross = resFn(opt.r) * sclFn(opt.s) * opt.mult;
+  const cost = (opt.r + opt.s + opt.sp) / 100 * BUDGET;
+
+  document.getElementById('opt-speed').textContent = opt.sp + '%';
+  document.getElementById('opt-mult').textContent = 'mult: ' + opt.mult.toFixed(2);
+  document.getElementById('opt-res-pct').textContent = opt.r + '%';
+  document.getElementById('opt-res-val').textContent = 'output: ' + fmt(resFn(opt.r));
+  document.getElementById('opt-scl-pct').textContent = opt.s + '%';
+  document.getElementById('opt-scl-val').textContent = 'output: ' + sclFn(opt.s).toFixed(2) + 'x';
+  document.getElementById('opt-pnl').textContent = fmt(opt.pnl);
+  document.getElementById('opt-pnl').style.color = opt.pnl >= 0 ? 'var(--color-text-success)' : 'var(--color-text-danger)';
+  document.getElementById('opt-gross').textContent = 'gross: ' + fmt(gross);
+  document.getElementById('opt-rank').textContent = '#' + rankInfo.rank.toLocaleString();
+  document.getElementById('opt-rank-of').textContent = 'su ' + rankInfo.total.toLocaleString() + ' teams';
+  document.getElementById('opt-budget').textContent = fmt(cost);
+  document.getElementById('opt-unspent').textContent = 'unspent: ' + fmt(BUDGET - cost);
+
+  const topMult = computeMultiplierFast(100, oppCounts);
+  const botMult = computeMultiplierFast(0, oppCounts);
+  document.getElementById('opt-note').textContent = `speed ${opt.sp}% → rank #${rankInfo.rank}`;
+
+  updateManual(oppCounts);
+}
+
+function updateManual(oppCounts) {
+  const sp = parseInt(document.getElementById('manual-slider').value);
+  document.getElementById('manual-slider-lbl').textContent = sp + '%';
+  const mult = computeMultiplierFast(sp, oppCounts);
+  const { r, s, pnl } = optRS(sp, mult);
+  const gross = resFn(r) * sclFn(s) * mult;
+  const cost = (r + s + sp) / 100 * BUDGET;
+  const rankInfo = computeRankInfo(sp, oppCounts);
+
+  const mc = document.getElementById('manual-metrics');
+  mc.innerHTML = `
+    <div class="metric-card"><p class="metric-label">Net PnL</p><p class="metric-value" style="color:${pnl>=0?'var(--color-text-success)':'var(--color-text-danger)'}">${fmt(pnl)}</p><p class="metric-sub">gross: ${fmt(gross)}</p></div>
+    <div class="metric-card"><p class="metric-label">Multiplier</p><p class="metric-value">${mult.toFixed(2)}</p><p class="metric-sub">rank #${rankInfo.rank}</p></div>
+    <div class="metric-card"><p class="metric-label">Research</p><p class="metric-value">${r}%</p><p class="metric-sub">${fmt(resFn(r))}</p></div>
+    <div class="metric-card"><p class="metric-label">Scale</p><p class="metric-value">${s}%</p><p class="metric-sub">${sclFn(s).toFixed(2)}x</p></div>
+    <div class="metric-card"><p class="metric-label">Budget usato</p><p class="metric-value">${fmt(cost)}</p><p class="metric-sub">unspent: ${fmt(BUDGET-cost)}</p></div>
+  `;
+
+  document.getElementById('m-bar-res').style.width = r + '%';
+  document.getElementById('m-bar-res-lbl').textContent = r + '%';
+  document.getElementById('m-bar-scl').style.width = s + '%';
+  document.getElementById('m-bar-scl-lbl').textContent = s + '%';
+  document.getElementById('m-bar-spd').style.width = sp + '%';
+  document.getElementById('m-bar-spd-lbl').textContent = sp + '%';
+}
+
+document.getElementById('manual-slider').addEventListener('input', () => update());
+
+renderBeliefs();
+update();
+</script>
