@@ -189,17 +189,28 @@ class ProductTrader:
         return {}
 
 # Class used for OSMIUM
+# Class used for OSMIUM
 class OsmiumTrader(ProductTrader):
     
+    '''
+    FV Estimation: We estimate the fair value using a Kalman Filter and then smoothing the line using an SMA(10). If the current timestamp has neither bid nor ask, we use last value for mid price as the current one
+    We compute the Z score considering as mean the SMA(500).
+    If we are inside the Z score interval [-z, +z], we only do normal market making. If the inventory reaches the limit we set, we only places resting bids on the opposite side.
+    If the z score is outside the interval, we aggressively take position in the opposite direction by placing resting orders and actively taking the mispriced ones.
+    '''
     # KALMAN FILTER PARAMETERS
     Q = 2.0       # Process noise: how much true FV can move per tick
     R = 10.0      # Measurement noise: how noisy we think the midpoint is
     P_INIT = 100.0  # Initial variance (large = we don't trust the initial guess)
     
     # Z SCORE PARAMETERS
-    MEAN_REV_LOOKBACK = 100
+    MEAN_REV_LOOKBACK = 500
     ZSCORE_THRESHOLD = 2.5
 
+    # Inventory threshold: inside [-zscore, zscore], suppress bids above +INV_THRESHOLD and asks below -INV_THRESHOLD
+    INV_THRESHOLD = 40
+    TAKE_LIMIT = 2
+    HALF_SPREAD = 8
  
     def _kalman_update(self, observation: float) -> tuple[float, float]:
 
@@ -235,6 +246,13 @@ class OsmiumTrader(ProductTrader):
 
         return x, P
     
+    def _kalman_sma(self, fv_kalman: float, window: int = 10) -> float:
+        history: list = self.last_traderData.get("ash_kf_sma_history", [])
+        history.append(fv_kalman)
+        history = history[-window:]
+        self.new_trader_data["ash_kf_sma_history"] = history
+        return sum(history) / len(history)
+
     def _z_score(self, fv: float) -> float:
 
         history: list = self.last_traderData.get("tom_mr_history", [])
@@ -262,89 +280,116 @@ class OsmiumTrader(ProductTrader):
  
     # Function which applies our strategy for Emeralds trading, outputs a dictionary containing the product name and the orders as a list
     def get_orders(self) -> dict:
-        '''
-        FV Estimation: We use a Kalman Filter on the mid price to filter out all the noise.
-        Order logic: - Normal market making between Z-Score -2 and 2, where it is computed as fv - SMA(100)
-                     - If Z-Score outside these thresholds, we accumulate inventory in the opposite direction
-                     - If there are misplaced bids and asks compared to our FV, we use them to unload some inventory and take free fills
-        '''
 
-        # If there are no bids and no asks, skip the turn --- FIX THIS LATER BY PLACING BIDS AND ASKS AT PREVIOUS PRICES
+        
+        
+        # SETTING UP AND COMPUTING FV AND Z SCORE ################################################
+        # If there are no bids and no asks, fall back to last known mid price
         if self.best_ask is None and self.best_bid is None:
-            return {self.name: self.orders}
+            self.mid_price = self.last_traderData.get("osmium_last_mid_price", None)
+        else:
+            self.new_trader_data["osmium_last_mid_price"] = self.mid_price
 
-        # Compute the Fair Value as the output of the Kalman Filter
-        fv, fv_var = self._kalman_update(self.mid_price)
+        # Compute the Fair Value as the SMA of the last 10 Kalman filter estimates
+        fv_kalman, fv_var = self._kalman_update(self.mid_price)
+        fv = self._kalman_sma(fv_kalman)
+
+        if self.best_ask is None and self.best_bid is None:
+            if fv is not None:
+                self.bid(fv - self.HALF_SPREAD, self.max_allowed_buy_volume, logging = True)
+                self.ask(fv + self.HALF_SPREAD, self.max_allowed_sell_volume, logging = True)
+
+            return {self.name: self.orders}
 
         # Compute Z-Score
         z_score = self._z_score(fv)
 
+        # Between the 2 thresholds of Z score, we just do market making on both sides by placing at optimal +-1, if we are too high or low on inventory, we stop placing on that side
         if -self.ZSCORE_THRESHOLD <= z_score <= self.ZSCORE_THRESHOLD:
             
-            # Pick mispriced orders both on the buy and sell side
-            if self.best_bid >= (fv - 1) or self.best_ask <= (fv + 1):
+            # Check if we are too long or too short
+            long_heavy  = self.initial_position >  self.INV_THRESHOLD
+            short_heavy = self.initial_position < -self.INV_THRESHOLD
 
-                if self.best_bid >= (fv - 1):
-
-                    for bid_price, bid_volume in self.mkt_buy_orders.items():
-                        if bid_price >= (fv - 1):
-                            self.ask(bid_price, bid_volume, logging = True)
-                    if self.best_ask is not None:
-                        self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging = True)
-                    elif self.best_ask is None:
-                        self.ask(fv + 8, self.max_allowed_sell_volume, logging = True)
-                
-                if self.best_ask <= (fv + 1):
-                        
-                    for ask_price, ask_volume in self.mkt_sell_orders.items():
-                        if ask_price <= (fv + 1):
-                            self.bid(ask_price, ask_volume, logging = True)
-                    if self.best_bid is not None:
-                        self.bid(self.best_bid + 1, self.max_allowed_buy_volume, logging = True)
-                    elif self.best_bid is None:
-                        self.bid(fv - 8, self.max_allowed_buy_volume, logging = True)
-
-            # Normal Market Making
-            else:
-                if self.best_bid is not None:
-                    self.bid(self.best_bid + 1, self.max_allowed_buy_volume, logging = True)
-                elif self.best_bid is None:
-                    self.bid(fv - 8, self.max_allowed_buy_volume, logging = True)
-                if self.best_ask is not None:
-                    self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging = True)
-                elif self.best_ask is None:
-                    self.ask(fv + 8, self.max_allowed_sell_volume, logging = True)
- 
-        elif z_score > self.ZSCORE_THRESHOLD:
-            
-            if self.best_bid >= (fv - 1):
-
-                for bid_price, bid_volume in self.mkt_buy_orders.items():
-                    if bid_price >= (fv - 1):
-                        self.ask(bid_price, bid_volume, logging = True)
-
-            if self.best_ask is not None:
-                self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging = True)
-            
-            elif self.best_ask is None:
-                self.ask(fv + 8, self.max_allowed_sell_volume, logging = True)
-
-        elif z_score < -self.ZSCORE_THRESHOLD:
-            
-            if self.best_ask <= (fv + 1):
-                for ask_price, ask_volume in self.mkt_sell_orders.items():
-                    if ask_price <= (fv + 1):
-                        self.bid(ask_price, ask_volume, logging = True)
-
-            if self.best_bid is not None:
+            # Buy fills #####################################
+            # We check if best bid exists and it's less than fv - take limit and we don't have too much long inventory
+            if self.best_bid is not None and self.best_bid < (fv - self.TAKE_LIMIT) and not long_heavy:
                 self.bid(self.best_bid + 1, self.max_allowed_buy_volume, logging = True)
             
-            elif self.best_bid is None:
-                self.bid(fv - 8, self.max_allowed_buy_volume, logging = True)
+            # We check if best bid exists and it's more than our threshold and we are not too long
+            # If it's above the threshold, check second best bid as above or place at fv - 8
+            elif self.best_bid is not None and self.best_bid >= (fv - self.TAKE_LIMIT) and not long_heavy:
+                if self.second_best_bid is not None and self.second_best_bid < (fv - self.TAKE_LIMIT):
+                    self.bid(self.second_best_bid + 1, self.max_allowed_buy_volume, logging = True)
+                else:
+                    self.bid(fv - self.HALF_SPREAD, self.max_allowed_buy_volume, logging = True)
+            
+            # If there's no best bid, check that we are not too long, then place at fv - half spread
+            elif self.best_bid is None and not long_heavy:
+                self.bid(fv - self.HALF_SPREAD, self.max_allowed_buy_volume, logging = True)
 
+            
+            # Sell fills #####################################
+            # We check if best ask exists and it's more than fv + take limit and we don't have too much short inventory
+            if self.best_ask is not None and self.best_ask > (fv + self.TAKE_LIMIT) and not short_heavy:
+                self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging = True)
+            
+            # We check if best ask exists and it's less than our threshold and we are not too short
+            # If it's below the threshold, check second best ask as above or place at fv + half spread
+            elif self.best_ask is not None and self.best_ask <= (fv + self.TAKE_LIMIT) and not short_heavy:
+                if self.second_best_ask is not None and self.second_best_ask > (fv + self.TAKE_LIMIT):
+                    self.ask(self.second_best_ask - 1, self.max_allowed_sell_volume, logging = True)
+                else:
+                    self.ask(fv + self.HALF_SPREAD, self.max_allowed_sell_volume, logging = True)
+            
+            # If there's no best ask, check that we are not too short, then place at fv + half spread
+            elif self.best_ask is None and not short_heavy:
+                self.ask(fv + self.HALF_SPREAD, self.max_allowed_sell_volume, logging = True)
+            
+                
+        # If we are above the threshold or below the threshold, we pick all the mispriced orders in the opposite direction, ignoring the inventory limits
+        elif z_score > self.ZSCORE_THRESHOLD:
+            
+            # Check if there's a best bid above the threshold we chose (fv - take limit), if there's fill that order
+            if self.best_bid is not None and self.best_bid >= (fv - self.TAKE_LIMIT):
+                for bid_price, bid_volume in self.mkt_buy_orders.items():
+                    if bid_price >= (fv - self.TAKE_LIMIT):
+                        self.ask(bid_price, bid_volume, logging=True)
+
+            # Check the best ask, if it exists and it's above the threshold of fv + take limit, place right below it
+            if self.best_ask is not None and self.best_ask > (fv + self.TAKE_LIMIT):
+                self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging=True)
+
+            # If the best ask does not exist or it's too low, place at fv + half spread
+            else:
+                self.ask(fv + self.HALF_SPREAD, self.max_allowed_sell_volume, logging=True)
+
+        # Opposite of what we did above
+        elif z_score < -self.ZSCORE_THRESHOLD:
+            
+            # Check if there's a best ask below the threshold we chose (fv + take limit), if there's fill that order
+            if self.best_ask is not None and self.best_ask <= (fv + self.TAKE_LIMIT):
+                for ask_price, ask_volume in self.mkt_sell_orders.items():
+                    if ask_price <= (fv + self.TAKE_LIMIT):
+                        self.bid(ask_price, ask_volume, logging=True)
+
+            # Check the best bid, if it exists and it's below the threshold of fv - take limit, place right above it
+            if self.best_bid is not None and self.best_bid < (fv - self.TAKE_LIMIT):
+                self.bid(self.best_bid + 1, self.max_allowed_buy_volume, logging=True)
+            
+            # If the best bid does not exist or it's too high, place at fv - half spread
+            else:
+                self.bid(fv - self.HALF_SPREAD, self.max_allowed_buy_volume, logging=True)
+
+
+        self.log("POS",    self.initial_position)
+        self.log("FV",     round(fv, 2))
+        self.log("BBID",   self.best_bid)
+        self.log("BASK",   self.best_ask)
+        self.log("SPREAD", self.spread)
 
         return {self.name: self.orders}
- 
+  
 
 # Class used for ROOTS
 class RootTrader(ProductTrader):
