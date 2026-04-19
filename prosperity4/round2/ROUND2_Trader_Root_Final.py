@@ -190,10 +190,19 @@ class ProductTrader:
 
 class RootTrader(ProductTrader):
 
+    '''
+    FV Estimation: We estimate the fair value as INTERCEPT (computed the moment we have a normal situation) + slope * timestamp
+    Initial phase: We buy at best asks for the volume of those orders, in the same iteration we place resting bids at either best bid + 1 or fv - 8
+    Running phase: - IF WE ARE AT 80 INVENTORY: We only look for shorts, by placing resting asks either at best ask - 1 if the best ask is above fair value
+                                                or at fv + 8, in case there's a best ask below fv.
+                   - IF WE ARE BELOW 80 INVENTORY: We look for mispriced asks below fair value, to get certain fills to get back to max inventory as soon as possible.
+                                                   If we are above the threshold for the inventory, we place resting asks either at best ask - 1 if best ask is above fair value, otherwise fv + 8
+                                                   Then we just place resting bids at best bid + 1 if it's below fv or at fv - 8
+    '''
 
     # Linear model parameters (from analysis)
     SLOPE = 0.001           # price units per timestamp
-    DOWNSIDE_INVENTORY_LIMIT = 70
+    DOWNSIDE_INVENTORY_LIMIT = 65
 
     def __init__(self, state: TradingState, prints: dict, new_trader_data: dict):
         super().__init__(ROOT_SYMBOL, state, prints, new_trader_data)
@@ -239,7 +248,7 @@ class RootTrader(ProductTrader):
            
             # If our initial position is equal to 80 (full long), switch the START signal to True such that we don't buy at best ask
             if self.initial_position == 80:
-                START=True
+                START = True
             
             # If we are not yet at 80 longs, buy at best ask for that amount and place resting orders at best bid + 1 or fv - 7
             if START == False: # starting cycle
@@ -248,55 +257,58 @@ class RootTrader(ProductTrader):
                 if self.best_ask is not None:
                     self.bid(self.best_ask, min(self.max_allowed_buy_volume, self.mkt_sell_orders[self.best_ask]))
                 
-                # Place resting orders at best bid or fv - 7
+                # Place resting orders at best bid or fv - 8
                 if self.best_bid is not None and self.best_bid < int(fv):
                     self.bid(self.best_bid + 1, self.max_allowed_buy_volume)
                 
                 else:
-                    self.bid(fv - 7, self.max_allowed_buy_volume)
+                    self.bid(fv - 8, self.max_allowed_buy_volume)
+                
+                self.new_trader_data["START"] = START
                 
                 return {self.name: self.orders}
             
             # If the START is True (we got to 80 inventory)
             elif START == True:
                 
-                # If we're 80 contracts long, look for opportunities to sell either at best ask - 1 or at fv + 7 if best ask is not present.
-                # Use misplaced bids (above fv) to get fills
+                # If we're 80 contracts long, look for opportunities to sell either at best ask - 1 or at fv + 8 if best ask is not present.
                 if self.initial_position == 80:
 
-                    # If the best ask exists, place a resting ask below it (floored at last_buy_price+1), otherwise place at fv + 8
-                    if self.best_ask is not None:
+                    # If the best ask exists, place a resting ask below it (if it's above fair value), otherwise place at fv + 8
+                    if self.best_ask is not None and self.best_ask > fv:
                         self.ask(self.best_ask - 1, self.max_allowed_sell_volume)
                     else:
                         self.ask(fv + 8, self.max_allowed_sell_volume)
 
                 # If we are below 80 inventory, it means we shorted something and we must get back to 80 inventory. 
-                # To do that we check for mispriced asks and place bid orders at best bid + 1 or fv - 7, on top of picking mispriced bids to sell.
+                # To do that we check for mispriced asks and place bid orders at best bid + 1 or fv - 8.
                 if self.initial_position < 80:
                     
                     # First we look for mispriced asks to fill them and get back to max inventory
-                    if self.best_ask is not None and self.best_ask <= int(fv):
+                    if self.best_ask is not None and self.best_ask <= int(fv - 2):
 
-                        # Cycle through all ask orders and check if they are below fv; track last buy price
+                        # Cycle through all ask orders and check if they are below fv
                         for ask_price, ask_volume in self.mkt_sell_orders.items():
-                            if ask_price <= int(fv):
+                            if ask_price <= int(fv - 2):
                                 self.bid(ask_price, ask_volume, logging = True)
                     
-                    # We check the asks, if they are above fair value, we place below them to sell, otherwise we place at fv + 8
-                    if self.best_ask is not None and self.best_ask > int(fv) and self.initial_position > self.DOWNSIDE_INVENTORY_LIMIT:
-                        self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging = True)
-                    
-                    elif self.best_ask is None and self.initial_position > self.DOWNSIDE_INVENTORY_LIMIT:
-                        self.ask(fv + 8, self.max_allowed_sell_volume, logging = True)
-                    
-                    # If we are here it means that the orders are far from the fv, in which case we just place resting bids to get back to 80 inventory
+                    # We check our initial position
+                    if self.initial_position > self.DOWNSIDE_INVENTORY_LIMIT:
+                        # We check the asks, if they are above fair value, we place below them to sell, otherwise we place at fv + 8
+                        if self.best_ask is not None and self.best_ask > int(fv):
+                            self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging = True)
+                        
+                        else:
+                            self.ask(fv + 8, self.max_allowed_sell_volume, logging = True)
+                        
+                   
                     # If the best bid exists, place a resting bid below it, otherwise place at fv - 8 to get back to 80 inventory. 
-                    # We only place bids because we want to get back to max inventory. Once at 80 we start placing asks once again
-                    # We also check if best bid < fv because it's possible that it's above fv, but we didn't sell into it because we are low on inventory, so we skipped that if
+                    # We only place bids because we want to get back to max inventory.
+                    # We check if the best bid is below fv to not bit too high
                     if self.best_bid is not None and self.best_bid < fv:
                         self.bid(self.best_bid + 1, self.max_allowed_buy_volume)
                     else:
-                        self.bid(fv - 7, self.max_allowed_buy_volume)
+                        self.bid(fv - 8, self.max_allowed_buy_volume)
         
         # We keep passing the START signal from one iteration to the following one to not get back to the starting buying rally
         self.new_trader_data["START"] = START
