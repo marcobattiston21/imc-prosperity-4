@@ -3,10 +3,10 @@ import json
 from typing import List
 
 
-OSMIUM_SYMBOL  = "ASH_COATED_OSMIUM"
+ROOT_SYMBOL  = "INTARIAN_PEPPER_ROOT"
 
 POS_LIMITS = {
-    OSMIUM_SYMBOL:   80,
+    ROOT_SYMBOL:   80,
 }
 
 
@@ -188,184 +188,145 @@ class ProductTrader:
         return {}
  
 
-# Class used for OSMIUM
-class OsmiumTrader(ProductTrader):
-    
-    # KALMAN FILTER PARAMETERS
-    Q = 2.0       # Process noise: how much true FV can move per tick
-    R = 10.0      # Measurement noise: how noisy we think the midpoint is
-    P_INIT = 100.0  # Initial variance (large = we don't trust the initial guess)
-    
-    # Z SCORE PARAMETERS
-    MEAN_REV_LOOKBACK = 100
-    ZSCORE_THRESHOLD = 2.5
-
- 
-    def _kalman_update(self, observation: float) -> tuple[float, float]:
-
-        kf = self.last_traderData.get("ash_kf", None)
- 
-        if kf is None:
-            # First tick ever → initialize with the current observation
-            x = observation
-            P = self.P_INIT
-
-        else:
-            x_prev = kf["x"]
-            P_prev = kf["P"]
- 
-            # --- PREDICT ---
-            # State transition is identity (random walk), so x_pred = x_prev
-            x_pred = x_prev
-            P_pred = P_prev + self.Q
- 
-            # --- UPDATE ---
-            # Innovation (observation residual)
-            y = observation - x_pred
-            # Innovation covariance
-            S = P_pred + self.R
-            # Kalman gain
-            K = P_pred / S
-            # New state estimate
-            x = x_pred + K * y
-            # New estimate variance
-            P = (1 - K) * P_pred
- 
-        self.new_trader_data["ash_kf"] = {"x": x, "P": P}
-
-        return x, P
-    
-    def _z_score(self, fv: float) -> float:
-
-        history: list = self.last_traderData.get("tom_mr_history", [])
-        history.append(fv)
-        history = history[-self.MEAN_REV_LOOKBACK:]
-        self.new_trader_data["tom_mr_history"] = history
- 
-        n = len(history)
-        if n < 10:
-            return 0.0
- 
-        sma = sum(history) / n
-        variance = sum((x - sma) ** 2 for x in history) / n
-        std = variance ** 0.5
- 
-        if std < 1e-9:
-            return 0.0
- 
-        return (fv - sma) / std
+class RootTrader(ProductTrader):
 
 
-    # Constructor, does the same things as the ProductTrader constructor using the super(), simply restricts to EMERALDS
+    # Linear model parameters (from analysis)
+    SLOPE = 0.001           # price units per timestamp
+    DOWNSIDE_INVENTORY_LIMIT = 70
+
     def __init__(self, state: TradingState, prints: dict, new_trader_data: dict):
-        super().__init__(OSMIUM_SYMBOL, state, prints, new_trader_data)
- 
-    # Function which applies our strategy for Emeralds trading, outputs a dictionary containing the product name and the orders as a list
+        super().__init__(ROOT_SYMBOL, state, prints, new_trader_data)
+        
+        self.INTERCEPT = self._get_intercept()
+
+    # setting intercept 
+    def _get_intercept(self) -> float:
+
+        INTERCEPT = self.last_traderData.get("intercept", None)
+        
+        if INTERCEPT is None and self.spread is not None and self.spread >= 12:
+            INTERCEPT = self.mid_price - self.SLOPE * self.state.timestamp
+
+        self.new_trader_data["intercept"] = INTERCEPT
+        
+        return INTERCEPT  
+
+
+    def _fair_value(self) -> float:
+
+        # Rolling fair value: intercept + slope × current timestamp
+        fv = self.INTERCEPT + self.SLOPE * self.state.timestamp if self.INTERCEPT is not None else None
+        
+        return fv
+
+
     def get_orders(self) -> dict:
-        '''
-        FV Estimation: We use a Kalman Filter on the mid price to filter out all the noise.
-        Order logic: - Normal market making between Z-Score -2 and 2, where it is computed as fv - SMA(100)
-                     - If Z-Score outside these thresholds, we accumulate inventory in the opposite direction
-                     - If there are misplaced bids and asks compared to our FV, we use them to unload some inventory and take free fills
-        '''
+        
+        # Get the START signal from past iteration
+        START = self.last_traderData.get("START", False)
 
-        # If there are no bids and no asks, skip the turn --- FIX THIS LATER BY PLACING BIDS AND ASKS AT PREVIOUS PRICES
-        if self.best_ask is None and self.best_bid is None:
-            return {self.name: self.orders}
+        # Compute the fair value as intercept + slope * timestamp
+        fv = self._fair_value()
 
-        # Compute the Fair Value as the output of the Kalman Filter
-        fv, fv_var = self._kalman_update(self.mid_price)
-
-        # Compute Z-Score
-        z_score = self._z_score(fv)
-
-        if -self.ZSCORE_THRESHOLD <= z_score <= self.ZSCORE_THRESHOLD:
+        # If the fair value is None (Missing bids or asks or particular situation, skip the turn)
+        if fv is None:
+            self.new_trader_data["START"] = START
+            return {self.name: self.orders} 
+        
+        # If the fair value is not none
+        elif fv is not None:
+           
+            # If our initial position is equal to 80 (full long), switch the START signal to True such that we don't buy at best ask
+            if self.initial_position == 80:
+                START=True
             
-            # Pick mispriced orders both on the buy and sell side
-            if self.best_bid >= (fv - 1) or self.best_ask <= (fv + 1):
+            # If we are not yet at 80 longs, buy at best ask for that amount and place resting orders at best bid + 1 or fv - 7
+            if START == False: # starting cycle
 
-                if self.best_bid >= (fv - 1):
-
-                    for bid_price, bid_volume in self.mkt_buy_orders.items():
-                        if bid_price >= (fv - 1):
-                            self.ask(bid_price, bid_volume, logging = True)
-                    if self.best_ask is not None:
-                        self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging = True)
-                    elif self.best_ask is None:
-                        self.ask(fv + 8, self.max_allowed_sell_volume, logging = True)
-                
-                if self.best_ask <= (fv + 1):
-                        
-                    for ask_price, ask_volume in self.mkt_sell_orders.items():
-                        if ask_price <= (fv + 1):
-                            self.bid(ask_price, ask_volume, logging = True)
-                    if self.best_bid is not None:
-                        self.bid(self.best_bid + 1, self.max_allowed_buy_volume, logging = True)
-                    elif self.best_bid is None:
-                        self.bid(fv - 8, self.max_allowed_buy_volume, logging = True)
-
-            # Normal Market Making
-            else:
-                if self.best_bid is not None:
-                    self.bid(self.best_bid + 1, self.max_allowed_buy_volume, logging = True)
-                elif self.best_bid is None:
-                    self.bid(fv - 8, self.max_allowed_buy_volume, logging = True)
+                # If there's a best ask, fill that order
                 if self.best_ask is not None:
-                    self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging = True)
-                elif self.best_ask is None:
-                    self.ask(fv + 8, self.max_allowed_sell_volume, logging = True)
- 
-        elif z_score > self.ZSCORE_THRESHOLD:
+                    self.bid(self.best_ask, min(self.max_allowed_buy_volume, self.mkt_sell_orders[self.best_ask]))
+                
+                # Place resting orders at best bid or fv - 7
+                if self.best_bid is not None and self.best_bid < int(fv):
+                    self.bid(self.best_bid + 1, self.max_allowed_buy_volume)
+                
+                else:
+                    self.bid(fv - 7, self.max_allowed_buy_volume)
+                
+                return {self.name: self.orders}
             
-            if self.best_bid >= (fv - 1):
+            # If the START is True (we got to 80 inventory)
+            elif START == True:
+                
+                # If we're 80 contracts long, look for opportunities to sell either at best ask - 1 or at fv + 7 if best ask is not present.
+                # Use misplaced bids (above fv) to get fills
+                if self.initial_position == 80:
 
-                for bid_price, bid_volume in self.mkt_buy_orders.items():
-                    if bid_price >= (fv - 1):
-                        self.ask(bid_price, bid_volume, logging = True)
+                    # If the best ask exists, place a resting ask below it (floored at last_buy_price+1), otherwise place at fv + 8
+                    if self.best_ask is not None:
+                        self.ask(self.best_ask - 1, self.max_allowed_sell_volume)
+                    else:
+                        self.ask(fv + 8, self.max_allowed_sell_volume)
 
-            if self.best_ask is not None:
-                self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging = True)
-            
-            elif self.best_ask is None:
-                self.ask(fv + 8, self.max_allowed_sell_volume, logging = True)
+                # If we are below 80 inventory, it means we shorted something and we must get back to 80 inventory. 
+                # To do that we check for mispriced asks and place bid orders at best bid + 1 or fv - 7, on top of picking mispriced bids to sell.
+                if self.initial_position < 80:
+                    
+                    # First we look for mispriced asks to fill them and get back to max inventory
+                    if self.best_ask is not None and self.best_ask <= int(fv):
 
-        elif z_score < -self.ZSCORE_THRESHOLD:
-            
-            if self.best_ask <= (fv + 1):
-                for ask_price, ask_volume in self.mkt_sell_orders.items():
-                    if ask_price <= (fv + 1):
-                        self.bid(ask_price, ask_volume, logging = True)
+                        # Cycle through all ask orders and check if they are below fv; track last buy price
+                        for ask_price, ask_volume in self.mkt_sell_orders.items():
+                            if ask_price <= int(fv):
+                                self.bid(ask_price, ask_volume, logging = True)
+                    
+                    # We check the asks, if they are above fair value, we place below them to sell, otherwise we place at fv + 8
+                    if self.best_ask is not None and self.best_ask > int(fv) and self.initial_position > self.DOWNSIDE_INVENTORY_LIMIT:
+                        self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging = True)
+                    
+                    elif self.best_ask is None and self.initial_position > self.DOWNSIDE_INVENTORY_LIMIT:
+                        self.ask(fv + 8, self.max_allowed_sell_volume, logging = True)
+                    
+                    # If we are here it means that the orders are far from the fv, in which case we just place resting bids to get back to 80 inventory
+                    # If the best bid exists, place a resting bid below it, otherwise place at fv - 8 to get back to 80 inventory. 
+                    # We only place bids because we want to get back to max inventory. Once at 80 we start placing asks once again
+                    # We also check if best bid < fv because it's possible that it's above fv, but we didn't sell into it because we are low on inventory, so we skipped that if
+                    if self.best_bid is not None and self.best_bid < fv:
+                        self.bid(self.best_bid + 1, self.max_allowed_buy_volume)
+                    else:
+                        self.bid(fv - 7, self.max_allowed_buy_volume)
+        
+        # We keep passing the START signal from one iteration to the following one to not get back to the starting buying rally
+        self.new_trader_data["START"] = START
 
-            if self.best_bid is not None:
-                self.bid(self.best_bid + 1, self.max_allowed_buy_volume, logging = True)
-            
-            elif self.best_bid is None:
-                self.bid(fv - 8, self.max_allowed_buy_volume, logging = True)
 
+        # Logging
+        self.log("POS",    self.initial_position)
+        self.log("FV",     round(fv, 2))
+        self.log("BBID",   self.best_bid)
+        self.log("BASK",   self.best_ask)
+        self.log("SPREAD", self.spread)
 
         return {self.name: self.orders}
- 
- 
-# TRADER CLASS
+
 class Trader:
- 
+
     def run(self, state: TradingState):
- 
+
         new_trader_data: dict = {}
         prints: dict = {
             "GENERAL": {"t": state.timestamp, "pos": state.position},
         }
- 
-        # Register one TraderClass per product symbol.
-        # Trader.run() instantiates each class only when its symbol
-        # appears in the live order book.
+
         product_traders = {
-            OSMIUM_SYMBOL: OsmiumTrader,
+            ROOT_SYMBOL:   RootTrader,
         }
- 
+
         result: dict = {}
         conversions: int = 0
- 
+
         for symbol, TraderClass in product_traders.items():
             if symbol in state.order_depths:
                 try:
@@ -373,15 +334,15 @@ class Trader:
                     result.update(trader.get_orders())
                 except:
                     pass
- 
+
         try:
             final_trader_data = json.dumps(new_trader_data)
         except:
             final_trader_data = ""
- 
+
         try:
             print(json.dumps(prints))
         except:
             pass
- 
+
         return result, conversions, final_trader_data
