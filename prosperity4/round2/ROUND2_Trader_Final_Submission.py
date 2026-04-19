@@ -188,7 +188,7 @@ class ProductTrader:
     def get_orders(self) -> dict:
         return {}
 
-# Class used for OSMIUM
+
 # Class used for OSMIUM
 class OsmiumTrader(ProductTrader):
     
@@ -312,6 +312,7 @@ class OsmiumTrader(ProductTrader):
             short_heavy = self.initial_position < -self.INV_THRESHOLD
 
             # Buy fills #####################################
+            
             # We check if best bid exists and it's less than fv - take limit and we don't have too much long inventory
             if self.best_bid is not None and self.best_bid < (fv - self.TAKE_LIMIT) and not long_heavy:
                 self.bid(self.best_bid + 1, self.max_allowed_buy_volume, logging = True)
@@ -330,6 +331,7 @@ class OsmiumTrader(ProductTrader):
 
             
             # Sell fills #####################################
+
             # We check if best ask exists and it's more than fv + take limit and we don't have too much short inventory
             if self.best_ask is not None and self.best_ask > (fv + self.TAKE_LIMIT) and not short_heavy:
                 self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging = True)
@@ -357,7 +359,7 @@ class OsmiumTrader(ProductTrader):
                         self.ask(bid_price, bid_volume, logging=True)
 
             # Check the best ask, if it exists and it's above the threshold of fv + take limit, place right below it
-            if self.best_ask is not None and self.best_ask > (fv + self.TAKE_LIMIT):
+            if self.best_ask is not None:
                 self.ask(self.best_ask - 1, self.max_allowed_sell_volume, logging=True)
 
             # If the best ask does not exist or it's too low, place at fv + half spread
@@ -374,7 +376,7 @@ class OsmiumTrader(ProductTrader):
                         self.bid(ask_price, ask_volume, logging=True)
 
             # Check the best bid, if it exists and it's below the threshold of fv - take limit, place right above it
-            if self.best_bid is not None and self.best_bid < (fv - self.TAKE_LIMIT):
+            if self.best_bid is not None:
                 self.bid(self.best_bid + 1, self.max_allowed_buy_volume, logging=True)
             
             # If the best bid does not exist or it's too high, place at fv - half spread
