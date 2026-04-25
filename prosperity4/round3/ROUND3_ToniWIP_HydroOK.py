@@ -12,13 +12,18 @@ OPTION_SYMBOLS = [
     "VEV_5100",
     "VEV_5200",
     "VEV_5300",
-    "VEV_5400",
-    "VEV_5500",
+    "VEV_5400"
 ]
 
 MM_OPTIONS_SYMBOLS = [
     "VEV_4000",
     "VEV_4500"
+]
+
+USELESS_OPTIONS_SYMBOLS = [
+    "VEV_5500",
+    "VEV_6000",
+    "VEV_6500"
 ]
 
 POS_LIMITS = {
@@ -51,7 +56,7 @@ class ProductTrader:
         self.initial_position: int = self.state.position.get(self.name, 0)
 
         self.mkt_buy_orders, self.mkt_sell_orders = self._parse_order_depth()
-        self.max_vol_bid, self.max_vol_ask = self._get_max_vol_ask_bid()
+        self.max_vol_bid, self.fv, self.max_vol_ask = self._get_max_vol_ask_bid()
         self.worst_bid, self.worst_ask = self._get_worst_bid_ask()
         self.best_bid, self.mid_price, self.best_ask = self._get_best_bid_ask()
         self.second_best_bid, self.second_best_ask = self._get_second_best_bid_ask()
@@ -89,7 +94,13 @@ class ProductTrader:
             if amount > max_vol_ask:
                 max_vol_ask = amount
                 max_vol_ask_price = price
-        return max_vol_bid_price, max_vol_ask_price
+        if max_vol_bid_price is None:
+            fv = max_vol_ask_price
+        elif max_vol_ask_price is None:
+            fv = max_vol_bid_price
+        else:
+            fv = (max_vol_bid_price + max_vol_ask_price) / 2
+        return max_vol_bid_price, fv, max_vol_ask_price
 
     def _get_worst_bid_ask(self) -> tuple:
         worst_bid = worst_ask = None
@@ -185,7 +196,7 @@ class HydrogelTrader(ProductTrader):
         if self.best_bid is None or self.best_ask is None or self.spread is None:
             return {self.name: self.orders}
 
-        fv = (self.max_vol_bid + self.max_vol_ask) / 2
+        fv = self.fv
 
         aggressive_selling = fv >= self.MEAN + self.HARD_THRESHOLD
         soft_selling = self.MEAN + self.SOFT_THRESHOLD < fv < self.MEAN + self.HARD_THRESHOLD
@@ -287,9 +298,9 @@ class OptionTrader:
       5. For the underlying, run a z-score mean-reversion (SMA-100, threshold 2).
     """
 
-    TTE = 5 / 365          # 5 calendar days, annualised
-    SMA_WINDOW = 100
-    ZSCORE_THRESHOLD = 2.0
+    TTE = 5 / 365         # 5 calendar days, annualised
+    SMA_WINDOW = 200
+    ZSCORE_THRESHOLD = 3.0
 
     def __init__(self, state: TradingState, prints: dict, new_trader_data: dict):
         self.state = state
@@ -306,6 +317,10 @@ class OptionTrader:
         self.mm_options = [
             ProductTrader(opt, state, prints, new_trader_data, product_group="OPTION")
             for opt in MM_OPTIONS_SYMBOLS
+        ]
+        self.useless_options = [
+            ProductTrader(opt, state, prints, new_trader_data, product_group="OPTION")
+            for opt in USELESS_OPTIONS_SYMBOLS
         ]
 
         # Reuse the already-parsed trader data from the underlying trader
@@ -324,8 +339,10 @@ class OptionTrader:
         return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
 
     def _bs_call(self, S: float, K: float, sigma: float) -> float:
+        
         if sigma <= 0 or S <= 0 or K <= 0:
             return max(S - K, 0.0)
+        
         sqrt_T = math.sqrt(self.TTE)
         d1 = (math.log(S / K) + 0.5 * sigma ** 2 * self.TTE) / (sigma * sqrt_T)
         d2 = d1 - sigma * sqrt_T
@@ -336,20 +353,28 @@ class OptionTrader:
         intrinsic = max(S - K, 0.0)
         if price <= intrinsic + 1e-6:
             return None
+        
         sigma = 0.5
+        
         sqrt_T = math.sqrt(self.TTE)
+        
         for _ in range(100):
             d1 = (math.log(S / K) + 0.5 * sigma ** 2 * self.TTE) / (sigma * sqrt_T)
             d2 = d1 - sigma * sqrt_T
             bs = S * self._norm_cdf(d1) - K * self._norm_cdf(d2)
             vega = S * self._norm_pdf(d1) * sqrt_T
+            
             diff = bs - price
+            
             if abs(diff) < 1e-6:
                 break
+            
             if vega < 1e-10:
                 break
+            
             sigma -= diff / vega
             sigma = max(0.001, min(sigma, 10.0))
+        
         return sigma
 
     # ------------------------------------------------------------------
@@ -359,7 +384,8 @@ class OptionTrader:
     def get_orders(self) -> dict:
         result: dict = {}
 
-        S = self.underlying.mid_price
+        S = self.underlying.fv
+        
         if S is None or S <= 0:
             for option in self.options:
                 result[option.name] = option.orders
@@ -371,11 +397,11 @@ class OptionTrader:
         log_moneyness_list: list[float] = []
         iv_list: list[float] = []
 
-        for option in self.options + self.mm_options:
+        for option in self.options + self.mm_options + self.useless_options:
             if option.best_bid is None or option.best_ask is None:
                 continue
             K = int(option.name.split("_")[-1])
-            iv = self._implied_vol(option.mid_price, S, K)
+            iv = self._implied_vol(option.fv, S, K)
             if iv is None:
                 continue
             log_moneyness_list.append(math.log(K / S))
@@ -407,21 +433,21 @@ class OptionTrader:
                     result[option.name] = option.orders
                     continue
 
-            fv = self._bs_call(S, K, smooth_iv)
+            theo_price = self._bs_call(S, K, smooth_iv)
 
             # Sell into bids above fair value
-            if option.best_bid is not None and option.best_bid > fv:
-                for bid_price, bid_vol in list(option.mkt_buy_orders.items()):
-                    if bid_price > fv:
+            if option.best_bid is not None and option.best_bid > theo_price:
+                for bid_price, bid_vol in option.mkt_buy_orders.items():
+                    if bid_price > theo_price:
                         option.ask(bid_price, bid_vol)
 
             # Buy into asks below fair value
-            if option.best_ask is not None and option.best_ask < fv:
-                for ask_price, ask_vol in list(option.mkt_sell_orders.items()):
-                    if ask_price < fv:
+            if option.best_ask is not None and option.best_ask < theo_price:
+                for ask_price, ask_vol in option.mkt_sell_orders.items():
+                    if ask_price < theo_price:
                         option.bid(ask_price, ask_vol)
 
-            option.log("FV", round(fv, 2))
+            option.log("Theo Price", round(theo_price, 2))
             option.log("IV", round(smooth_iv, 4))
             result[option.name] = option.orders
 
@@ -443,45 +469,45 @@ class OptionTrader:
                 result[option.name] = option.orders
                 continue
 
-            if fitted_coeffs is not None:
-                lm = math.log(K / S)
-                smooth_iv = float(np.polyval(fitted_coeffs, lm))
-                smooth_iv = max(0.001, smooth_iv)
-            else:
-                smooth_iv = self._implied_vol(option.mid_price, S, K)
-                if smooth_iv is None:
-                    result[option.name] = option.orders
-                    continue
-
-            fv = self._bs_call(S, K, smooth_iv)
+            fv = option.fv
 
             # Use mispriced orders to offload inventory before posting quotes
             # Bids above FV: sell into them (reduces long / builds short)
-            if option.best_bid > fv:
-                for bid_price, bid_vol in list(option.mkt_buy_orders.items()):
-                    if bid_price > fv:
+            if option.best_bid >= (fv - 2):
+                
+                for bid_price, bid_vol in option.mkt_buy_orders.items():
+                    if bid_price >= (fv - 2):
                         option.ask(bid_price, bid_vol)
 
+                option.bid(option.second_best_bid + 1, option.max_allowed_buy_volume)
+                option.ask(option.best_ask - 1, option.max_allowed_sell_volume)
+
             # Asks below FV: buy into them (reduces short / builds long)
-            if option.best_ask < fv:
-                for ask_price, ask_vol in list(option.mkt_sell_orders.items()):
-                    if ask_price < fv:
+            elif option.best_ask <= (fv + 2):
+                
+                for ask_price, ask_vol in option.mkt_sell_orders.items():
+                    if ask_price <= (fv + 2):
                         option.bid(ask_price, ask_vol)
+                
+                option.ask(option.second_best_ask - 1, option.max_allowed_sell_volume)
+                option.bid(option.best_bid + 1, option.max_allowed_buy_volume)
+            
+            else:
+                # Resting MM quotes inside the spread
+                option.bid(option.best_bid + 1, option.max_allowed_buy_volume)
+                option.ask(option.best_ask - 1, option.max_allowed_sell_volume)
 
-            # Resting MM quotes inside the spread
-            option.bid(option.best_bid + 1, option.max_allowed_buy_volume)
-            option.ask(option.best_ask - 1, option.max_allowed_sell_volume)
 
-            option.log("MM_FV", round(fv, 2))
-            option.log("MM_IV", round(smooth_iv, 4))
             result[option.name] = option.orders
 
         return result
 
     def _get_underlying_orders(self, S: float) -> dict:
+        
         history: list = self.last_traderData.get("velvet_prices", [])
         history.append(S)
-        if len(history) > self.SMA_WINDOW:
+        
+        if len(history) >= self.SMA_WINDOW:
             history = history[-self.SMA_WINDOW :]
         self.new_trader_data["velvet_prices"] = history
 
@@ -500,18 +526,19 @@ class OptionTrader:
         self.underlying.log("ZSCORE", round(zscore, 4))
         self.underlying.log("SMA", round(sma, 2))
 
-        if zscore > self.ZSCORE_THRESHOLD:
-            if self.underlying.best_bid is not None:
-                self.underlying.ask(
-                    self.underlying.best_bid,
-                    self.underlying.max_allowed_sell_volume,
-                )
-        elif zscore < -self.ZSCORE_THRESHOLD:
-            if self.underlying.best_ask is not None:
-                self.underlying.bid(
-                    self.underlying.best_ask,
-                    self.underlying.max_allowed_buy_volume,
-                )
+        if self.underlying.best_bid is None or self.underlying.best_ask is None:
+            return {self.underlying.name: self.underlying.orders}
+        
+        if zscore >= self.ZSCORE_THRESHOLD:
+            self.underlying.ask(self.underlying.best_bid, self.underlying.mkt_buy_orders[self.underlying.best_bid])
+            self.underlying.ask(self.underlying.best_ask - 1, self.underlying.max_allowed_sell_volume)
+
+        elif zscore <= -self.ZSCORE_THRESHOLD:
+            self.underlying.bid(self.underlying.best_ask, self.underlying.mkt_sell_orders[self.underlying.best_ask])
+            self.underlying.bid(self.underlying.best_bid + 1, self.underlying.max_allowed_buy_volume)
+        
+
+
 
         return {self.underlying.name: self.underlying.orders}
 
