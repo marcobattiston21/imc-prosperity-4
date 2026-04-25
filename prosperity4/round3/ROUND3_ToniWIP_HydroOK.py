@@ -1,12 +1,33 @@
 from datamodel import OrderDepth, TradingState, Order
 import json
+import math
+import numpy as np
 from typing import List
 
 HYDROGEL_SYMBOL = "HYDROGEL_PACK"
+VELVET_SYMBOL = "VELVETFRUIT_EXTRACT"
+
+OPTION_SYMBOLS = [
+    "VEV_5000",
+    "VEV_5100",
+    "VEV_5200",
+    "VEV_5300",
+    "VEV_5400",
+    "VEV_5500",
+]
+
+MM_OPTIONS_SYMBOLS = [
+    "VEV_4000",
+    "VEV_4500"
+]
 
 POS_LIMITS = {
-    HYDROGEL_SYMBOL: 200
+    HYDROGEL_SYMBOL: 200,
+    VELVET_SYMBOL: 200,
+    **{sym: 300 for sym in OPTION_SYMBOLS},
+    **{sym: 300 for sym in MM_OPTIONS_SYMBOLS},
 }
+
 
 class ProductTrader:
 
@@ -156,11 +177,8 @@ class HydrogelTrader(ProductTrader):
                      - If we are below MEAN - HARD_THRESHOLD --> Buy aggressively at best ask
     '''
 
-
-
     def __init__(self, state: TradingState, prints: dict, new_trader_data: dict):
         super().__init__(HYDROGEL_SYMBOL, state, prints, new_trader_data)
-
 
     def get_orders(self) -> dict:
 
@@ -178,46 +196,40 @@ class HydrogelTrader(ProductTrader):
         # NORMAL REGIME
         if normal_mm is True:
 
-            # First take mispriced orders
-            # Mispriced bids --> We sell into it, then placing a buy at fv - 7 and ask at best ask - 1
+            # Mispriced bids --> sell into them, then place a resting buy at fv - HALF_SPREAD and ask inside spread
             if self.best_bid >= (fv - self.TAKE_THRESHOLD):
-                
+
                 for bid_price, bid_volume in self.mkt_buy_orders.items():
                     if bid_price >= (fv - self.TAKE_THRESHOLD):
-
                         self.ask(bid_price, bid_volume)
-                
+
                 self.bid(fv - self.HALF_SPREAD, self.max_allowed_buy_volume)
                 self.ask(self.best_ask - 1, self.max_allowed_sell_volume)
-            
-            # Mispriced asks --> We buy into it, then placing a ask at fv + 7 and bid at best bid + 1
+
+            # Mispriced asks --> buy into them, then place a resting ask at fv + HALF_SPREAD and bid inside spread
             elif self.best_ask <= (fv + self.TAKE_THRESHOLD):
-                
+
                 for ask_price, ask_volume in self.mkt_sell_orders.items():
                     if ask_price <= (fv + self.TAKE_THRESHOLD):
-
                         self.bid(ask_price, ask_volume)
-                
+
                 self.bid(self.best_bid + 1, self.max_allowed_buy_volume)
                 self.ask(fv + self.HALF_SPREAD, self.max_allowed_sell_volume)
-            
-            # If there are no mispriced orders just post inside the spread
+
+            # No mispriced orders: post inside the spread
             else:
                 self.bid(self.best_bid + 1, self.max_allowed_buy_volume)
                 self.ask(self.best_ask - 1, self.max_allowed_sell_volume)
-        
+
         # SOFT SELLING REGIME
         elif soft_selling is True:
-            
-            # Now we check for mispriced bids and use them to sell
+
             if self.best_bid >= (fv - self.TAKE_THRESHOLD):
-                
                 for bid_price, bid_volume in self.mkt_buy_orders.items():
                     if bid_price >= (fv - self.TAKE_THRESHOLD):
-
                         self.ask(bid_price, bid_volume)
 
-            # We want to sell here, but if there's a cheap ask and we are already short, we use it to reduce inventory and lock in profits
+            # If already short and there's a cheap ask, reduce inventory
             if self.initial_position < 0 and self.best_ask <= (fv + self.TAKE_THRESHOLD):
                 self.bid(self.best_ask, self.mkt_sell_orders[self.best_ask])
                 self.ask(fv + self.HALF_SPREAD, self.max_allowed_sell_volume)
@@ -227,32 +239,25 @@ class HydrogelTrader(ProductTrader):
         # SOFT BUYING REGIME
         elif soft_buying is True:
 
-            # Now we check for mispriced asks and use them to buy
             if self.best_ask <= (fv + self.TAKE_THRESHOLD):
-                
                 for ask_price, ask_volume in self.mkt_sell_orders.items():
                     if ask_price <= (fv + self.TAKE_THRESHOLD):
-
                         self.bid(ask_price, ask_volume)
-                
-            # We want to buy here, but if there's a cheap bid and we are already long, we use it to reduce inventory and lock in profits
+
+            # If already long and there's a rich bid, reduce inventory
             if self.initial_position > 0 and self.best_bid >= (fv - self.TAKE_THRESHOLD):
                 self.ask(self.best_bid, self.mkt_buy_orders[self.best_bid])
                 self.bid(fv - self.HALF_SPREAD, self.max_allowed_buy_volume)
             else:
                 self.bid(self.best_bid + 1, self.max_allowed_buy_volume)
-        
+
         # AGGRESSIVE SELLING REGIME
         elif aggressive_selling is True:
-            
-            # Always sell into the best bid for that amount, then place a resting ask at best ask - 1
             self.ask(self.best_bid, self.mkt_buy_orders[self.best_bid])
             self.ask(self.best_ask - 1, self.max_allowed_sell_volume)
 
         # AGGRESSIVE BUYING REGIME
         elif aggressive_buying is True:
-
-            # Always buy into the best ask for that amount, then place a resting bid at best bid + 1
             self.bid(self.best_ask, self.mkt_sell_orders[self.best_ask])
             self.bid(self.best_bid + 1, self.max_allowed_buy_volume)
 
@@ -266,8 +271,249 @@ class HydrogelTrader(ProductTrader):
         self.log("BASK", self.best_ask)
         self.log("BBID", self.best_bid)
 
-
         return {self.name: self.orders}
+
+
+
+class OptionTrader:
+    """
+    Vol-smile market-taking on VEV options + mean reversion on VELVETFRUIT_EXTRACT.
+
+    Each tick:
+      1. Compute mid-price IV for every option with a two-sided market.
+      2. Fit a degree-2 parabola (polyfit) on log-moneyness vs IV.
+      3. Re-evaluate each option's fair value using the smoothed smile IV.
+      4. Sell into bids above FV, buy into asks below FV.
+      5. For the underlying, run a z-score mean-reversion (SMA-100, threshold 2).
+    """
+
+    TTE = 5 / 365          # 5 calendar days, annualised
+    SMA_WINDOW = 100
+    ZSCORE_THRESHOLD = 2.0
+
+    def __init__(self, state: TradingState, prints: dict, new_trader_data: dict):
+        self.state = state
+        self.prints = prints
+        self.new_trader_data = new_trader_data
+
+        self.options = [
+            ProductTrader(sym, state, prints, new_trader_data, product_group="OPTION")
+            for sym in OPTION_SYMBOLS
+        ]
+        self.underlying = ProductTrader(
+            VELVET_SYMBOL, state, prints, new_trader_data, product_group="VELVET"
+        )
+        self.mm_options = [
+            ProductTrader(opt, state, prints, new_trader_data, product_group="OPTION")
+            for opt in MM_OPTIONS_SYMBOLS
+        ]
+
+        # Reuse the already-parsed trader data from the underlying trader
+        self.last_traderData: dict = self.underlying.last_traderData
+
+    # ------------------------------------------------------------------
+    # Black-Scholes helpers (r = 0)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _norm_cdf(x: float) -> float:
+        return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
+
+    @staticmethod
+    def _norm_pdf(x: float) -> float:
+        return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+    def _bs_call(self, S: float, K: float, sigma: float) -> float:
+        if sigma <= 0 or S <= 0 or K <= 0:
+            return max(S - K, 0.0)
+        sqrt_T = math.sqrt(self.TTE)
+        d1 = (math.log(S / K) + 0.5 * sigma ** 2 * self.TTE) / (sigma * sqrt_T)
+        d2 = d1 - sigma * sqrt_T
+        return S * self._norm_cdf(d1) - K * self._norm_cdf(d2)
+
+    def _implied_vol(self, price: float, S: float, K: float) -> float | None:
+        """Newton-Raphson IV solver. Returns None if price <= intrinsic."""
+        intrinsic = max(S - K, 0.0)
+        if price <= intrinsic + 1e-6:
+            return None
+        sigma = 0.5
+        sqrt_T = math.sqrt(self.TTE)
+        for _ in range(100):
+            d1 = (math.log(S / K) + 0.5 * sigma ** 2 * self.TTE) / (sigma * sqrt_T)
+            d2 = d1 - sigma * sqrt_T
+            bs = S * self._norm_cdf(d1) - K * self._norm_cdf(d2)
+            vega = S * self._norm_pdf(d1) * sqrt_T
+            diff = bs - price
+            if abs(diff) < 1e-6:
+                break
+            if vega < 1e-10:
+                break
+            sigma -= diff / vega
+            sigma = max(0.001, min(sigma, 10.0))
+        return sigma
+
+    # ------------------------------------------------------------------
+    # Main entry point
+    # ------------------------------------------------------------------
+
+    def get_orders(self) -> dict:
+        result: dict = {}
+
+        S = self.underlying.mid_price
+        if S is None or S <= 0:
+            for option in self.options:
+                result[option.name] = option.orders
+            result[self.underlying.name] = self.underlying.orders
+            return result
+
+        # --- Step 1 & 2: collect IV / log-moneyness, fit smile parabola ---
+        # Use all options (including MM ones) that have a two-sided market
+        log_moneyness_list: list[float] = []
+        iv_list: list[float] = []
+
+        for option in self.options + self.mm_options:
+            if option.best_bid is None or option.best_ask is None:
+                continue
+            K = int(option.name.split("_")[-1])
+            iv = self._implied_vol(option.mid_price, S, K)
+            if iv is None:
+                continue
+            log_moneyness_list.append(math.log(K / S))
+            iv_list.append(iv)
+
+        fitted_coeffs = None
+        if len(log_moneyness_list) >= 3:
+            try:
+                fitted_coeffs = np.polyfit(log_moneyness_list, iv_list, 2)
+                self.new_trader_data["vol_smile_coeffs"] = fitted_coeffs.tolist()
+            except Exception:
+                pass
+
+        # --- Step 3 & 4: fair-value each option and take mispriced orders ---
+        for option in self.options:
+            K = int(option.name.split("_")[-1])
+
+            if fitted_coeffs is not None:
+                lm = math.log(K / S)
+                smooth_iv = float(np.polyval(fitted_coeffs, lm))
+                smooth_iv = max(0.001, smooth_iv)
+            else:
+                # No smile available — fall back to raw IV for this option
+                if option.best_bid is None or option.best_ask is None:
+                    result[option.name] = option.orders
+                    continue
+                smooth_iv = self._implied_vol(option.mid_price, S, K)
+                if smooth_iv is None:
+                    result[option.name] = option.orders
+                    continue
+
+            fv = self._bs_call(S, K, smooth_iv)
+
+            # Sell into bids above fair value
+            if option.best_bid is not None and option.best_bid > fv:
+                for bid_price, bid_vol in list(option.mkt_buy_orders.items()):
+                    if bid_price > fv:
+                        option.ask(bid_price, bid_vol)
+
+            # Buy into asks below fair value
+            if option.best_ask is not None and option.best_ask < fv:
+                for ask_price, ask_vol in list(option.mkt_sell_orders.items()):
+                    if ask_price < fv:
+                        option.bid(ask_price, ask_vol)
+
+            option.log("FV", round(fv, 2))
+            option.log("IV", round(smooth_iv, 4))
+            result[option.name] = option.orders
+
+        # --- Step 5: MM options ---
+        result.update(self._get_mm_option_orders(fitted_coeffs, S))
+
+        # --- Step 6: underlying mean reversion ---
+        result.update(self._get_underlying_orders(S))
+
+        return result
+
+    def _get_mm_option_orders(self, fitted_coeffs, S: float) -> dict:
+        result: dict = {}
+
+        for option in self.mm_options:
+            K = int(option.name.split("_")[-1])
+
+            if option.best_bid is None or option.best_ask is None:
+                result[option.name] = option.orders
+                continue
+
+            if fitted_coeffs is not None:
+                lm = math.log(K / S)
+                smooth_iv = float(np.polyval(fitted_coeffs, lm))
+                smooth_iv = max(0.001, smooth_iv)
+            else:
+                smooth_iv = self._implied_vol(option.mid_price, S, K)
+                if smooth_iv is None:
+                    result[option.name] = option.orders
+                    continue
+
+            fv = self._bs_call(S, K, smooth_iv)
+
+            # Use mispriced orders to offload inventory before posting quotes
+            # Bids above FV: sell into them (reduces long / builds short)
+            if option.best_bid > fv:
+                for bid_price, bid_vol in list(option.mkt_buy_orders.items()):
+                    if bid_price > fv:
+                        option.ask(bid_price, bid_vol)
+
+            # Asks below FV: buy into them (reduces short / builds long)
+            if option.best_ask < fv:
+                for ask_price, ask_vol in list(option.mkt_sell_orders.items()):
+                    if ask_price < fv:
+                        option.bid(ask_price, ask_vol)
+
+            # Resting MM quotes inside the spread
+            option.bid(option.best_bid + 1, option.max_allowed_buy_volume)
+            option.ask(option.best_ask - 1, option.max_allowed_sell_volume)
+
+            option.log("MM_FV", round(fv, 2))
+            option.log("MM_IV", round(smooth_iv, 4))
+            result[option.name] = option.orders
+
+        return result
+
+    def _get_underlying_orders(self, S: float) -> dict:
+        history: list = self.last_traderData.get("velvet_prices", [])
+        history.append(S)
+        if len(history) > self.SMA_WINDOW:
+            history = history[-self.SMA_WINDOW :]
+        self.new_trader_data["velvet_prices"] = history
+
+        if len(history) < self.SMA_WINDOW:
+            return {self.underlying.name: self.underlying.orders}
+
+        arr = np.array(history, dtype=float)
+        sma = arr.mean()
+        std = arr.std()
+
+        if std < 1e-10:
+            return {self.underlying.name: self.underlying.orders}
+
+        zscore = (S - sma) / std
+
+        self.underlying.log("ZSCORE", round(zscore, 4))
+        self.underlying.log("SMA", round(sma, 2))
+
+        if zscore > self.ZSCORE_THRESHOLD:
+            if self.underlying.best_bid is not None:
+                self.underlying.ask(
+                    self.underlying.best_bid,
+                    self.underlying.max_allowed_sell_volume,
+                )
+        elif zscore < -self.ZSCORE_THRESHOLD:
+            if self.underlying.best_ask is not None:
+                self.underlying.bid(
+                    self.underlying.best_ask,
+                    self.underlying.max_allowed_buy_volume,
+                )
+
+        return {self.underlying.name: self.underlying.orders}
 
 
 class Trader:
@@ -281,6 +527,7 @@ class Trader:
 
         product_traders = {
             HYDROGEL_SYMBOL: HydrogelTrader,
+            VELVET_SYMBOL: OptionTrader,
         }
 
         result: dict = {}
@@ -296,12 +543,12 @@ class Trader:
 
         try:
             final_trader_data = json.dumps(new_trader_data)
-        except:
+        except Exception:
             final_trader_data = ""
 
         try:
             print(json.dumps(prints))
-        except:
+        except Exception:
             pass
 
         return result, conversions, final_trader_data
