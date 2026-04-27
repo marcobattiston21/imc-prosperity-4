@@ -1,33 +1,43 @@
 from datamodel import OrderDepth, TradingState, Order
 import json
-import numpy as np
 from typing import List
 
 HYDROGEL_SYMBOL = "HYDROGEL_PACK"
 VELVET_SYMBOL = "VELVETFRUIT_EXTRACT"
 
-# All tradable option strikes. We skip VEV_6000/6500 because they're stuck at 0.5 (worthless).
-OPTION_SYMBOLS = [
-    "VEV_4000",
-    "VEV_4500",
+ATM_OPTION_SYMBOLS = [
     "VEV_5000",
     "VEV_5100",
     "VEV_5200",
     "VEV_5300",
     "VEV_5400",
+]
+
+MM_OPTION_SYMBOL          = "VEV_4500"   # simple MM
+INFORMED_MM_OPTION_SYMBOL = "VEV_4000"   # MM gated by informed trader
+
+USELESS_OPTIONS_SYMBOLS = [
     "VEV_5500",
+    "VEV_6000",
+    "VEV_6500",
 ]
 
 POS_LIMITS = {
     HYDROGEL_SYMBOL: 200,
     VELVET_SYMBOL: 200,
-    **{sym: 300 for sym in OPTION_SYMBOLS},
+    **{sym: 300 for sym in ATM_OPTION_SYMBOLS},
+    MM_OPTION_SYMBOL: 300,
+    INFORMED_MM_OPTION_SYMBOL: 300,
 }
 
+INFORMED_TRADER_ID = "Mark 14"
+INFORMED_WINDOW = 500   # 5 timestamps × 100 ms each
 
-# ----------------------------------------------------------------------------- 
-# Base class — exactly your style
-# -----------------------------------------------------------------------------
+NEUTRAL = 0
+LONG = 1
+SHORT = -1
+
+
 class ProductTrader:
 
     def __init__(
@@ -156,321 +166,239 @@ class ProductTrader:
         group[kind] = message
         self.prints[group_key] = group
 
+    def check_for_informed(self) -> int:
+        """
+        Returns LONG, SHORT, or NEUTRAL based on whether the informed trader
+        traded this product in the last 5 timestamps (INFORMED_WINDOW ms).
+        Timestamps are stored as rolling lists keyed by '{name}_informed'.
+        """
+        key = self.name + "_informed"
+        saved = self.last_traderData.get(key, {"buys": [], "sells": []})
+        buy_timestamps: list = list(saved.get("buys", []))
+        sell_timestamps: list = list(saved.get("sells", []))
+
+        trades = (
+            self.state.market_trades.get(self.name, [])
+            + self.state.own_trades.get(self.name, [])
+        )
+        for trade in trades:
+            if trade.buyer == INFORMED_TRADER_ID:
+                buy_timestamps.append(trade.timestamp)
+            if trade.seller == INFORMED_TRADER_ID:
+                sell_timestamps.append(trade.timestamp)
+
+        current_ts = self.state.timestamp
+        buy_timestamps  = [ts for ts in buy_timestamps  if current_ts - ts <= INFORMED_WINDOW]
+        sell_timestamps = [ts for ts in sell_timestamps if current_ts - ts <= INFORMED_WINDOW]
+
+        self.new_trader_data[key] = {"buys": buy_timestamps, "sells": sell_timestamps}
+
+        informed_bought = len(buy_timestamps) > 0
+        informed_sold   = len(sell_timestamps) > 0
+
+        if informed_bought and not informed_sold:
+            direction = LONG
+        elif informed_sold and not informed_bought:
+            direction = SHORT
+        elif informed_bought and informed_sold:
+            if max(buy_timestamps) > max(sell_timestamps):
+                direction = LONG
+            elif max(sell_timestamps) > max(buy_timestamps):
+                direction = SHORT
+            else:
+                direction = NEUTRAL
+        else:
+            direction = NEUTRAL
+
+        self.log("TD", {"buys": buy_timestamps, "sells": sell_timestamps})
+        self.log("ID", direction)
+        return direction
+
     def get_orders(self) -> dict:
         return {}
 
 
-# -----------------------------------------------------------------------------
-# Hydrogel — kept identical to your latest soft/hard threshold version
-# -----------------------------------------------------------------------------
 class HydrogelTrader(ProductTrader):
 
-    MEAN = 9990
-    SOFT_THRESHOLD = 20
-    HARD_THRESHOLD = 60
-    TAKE_THRESHOLD = 3
-    HALF_SPREAD = 7
+    MEAN = 9994
+    D_THRESHOLD_SOFT = 20    # distance (FV - mean) that switches regime
+    D_THRESHOLD_HARD = 50
 
     def __init__(self, state: TradingState, prints: dict, new_trader_data: dict):
         super().__init__(HYDROGEL_SYMBOL, state, prints, new_trader_data)
 
     def get_orders(self) -> dict:
 
-        if self.best_bid is None or self.best_ask is None or self.spread is None:
+        if self.best_bid is None or self.best_ask is None:
             return {self.name: self.orders}
 
         fv = self.fv
+        dist = fv - self.MEAN
 
-        aggressive_selling = fv >= self.MEAN + self.HARD_THRESHOLD
-        soft_selling = self.MEAN + self.SOFT_THRESHOLD < fv < self.MEAN + self.HARD_THRESHOLD
-        normal_mm = self.MEAN - self.SOFT_THRESHOLD <= fv <= self.MEAN + self.SOFT_THRESHOLD
-        soft_buying = self.MEAN - self.HARD_THRESHOLD < fv < self.MEAN - self.SOFT_THRESHOLD
-        aggressive_buying = fv <= self.MEAN - self.HARD_THRESHOLD
-
-        if normal_mm:
-            if self.best_bid >= (fv - self.TAKE_THRESHOLD):
-                for bid_price, bid_volume in self.mkt_buy_orders.items():
-                    if bid_price >= (fv - self.TAKE_THRESHOLD):
-                        self.ask(bid_price, bid_volume)
-                self.bid(fv - self.HALF_SPREAD, self.max_allowed_buy_volume)
-                self.ask(self.best_ask - 1, self.max_allowed_sell_volume)
-            elif self.best_ask <= (fv + self.TAKE_THRESHOLD):
-                for ask_price, ask_volume in self.mkt_sell_orders.items():
-                    if ask_price <= (fv + self.TAKE_THRESHOLD):
-                        self.bid(ask_price, ask_volume)
-                self.bid(self.best_bid + 1, self.max_allowed_buy_volume)
-                self.ask(fv + self.HALF_SPREAD, self.max_allowed_sell_volume)
-            else:
-                self.bid(self.best_bid + 1, self.max_allowed_buy_volume)
-                self.ask(self.best_ask - 1, self.max_allowed_sell_volume)
-
-        elif soft_selling:
-            if self.best_bid >= (fv - self.TAKE_THRESHOLD):
-                for bid_price, bid_volume in self.mkt_buy_orders.items():
-                    if bid_price >= (fv - self.TAKE_THRESHOLD):
-                        self.ask(bid_price, bid_volume)
-            if self.initial_position < 0 and self.best_ask <= (fv + self.TAKE_THRESHOLD):
-                self.bid(self.best_ask, self.mkt_sell_orders[self.best_ask])
-                self.ask(fv + self.HALF_SPREAD, self.max_allowed_sell_volume)
-            else:
-                self.ask(self.best_ask - 1, self.max_allowed_sell_volume)
-
-        elif soft_buying:
-            if self.best_ask <= (fv + self.TAKE_THRESHOLD):
-                for ask_price, ask_volume in self.mkt_sell_orders.items():
-                    if ask_price <= (fv + self.TAKE_THRESHOLD):
-                        self.bid(ask_price, ask_volume)
-            if self.initial_position > 0 and self.best_bid >= (fv - self.TAKE_THRESHOLD):
-                self.ask(self.best_bid, self.mkt_buy_orders[self.best_bid])
-                self.bid(fv - self.HALF_SPREAD, self.max_allowed_buy_volume)
-            else:
-                self.bid(self.best_bid + 1, self.max_allowed_buy_volume)
-
-        elif aggressive_selling:
+        # Price well above mean → short-side focus: fill best bids, rest ask
+        if dist > self.D_THRESHOLD_HARD:
             self.ask(self.best_bid, self.mkt_buy_orders[self.best_bid])
             self.ask(self.best_ask - 1, self.max_allowed_sell_volume)
 
-        elif aggressive_buying:
+        # Price well below mean → long-side focus: fill best asks, rest bid
+        elif dist < -self.D_THRESHOLD_HARD:
             self.bid(self.best_ask, self.mkt_sell_orders[self.best_ask])
             self.bid(self.best_bid + 1, self.max_allowed_buy_volume)
 
-        self.log("FV", fv)
-        self.log("POS", self.initial_position)
+        elif self.D_THRESHOLD_SOFT < dist < self.D_THRESHOLD_HARD:
+            
+            if self.best_bid >= fv:
+                for bid_price, bid_vol in self.mkt_buy_orders.items():
+                    if bid_price >= fv:
+                        self.ask(bid_price, bid_vol)
+
+            if self.best_ask > fv + 1:
+                self.ask(self.best_ask - 1, self.max_allowed_sell_volume)
+            else:
+                self.ask(fv + 7, self.max_allowed_sell_volume)
+        
+        elif -self.D_THRESHOLD_HARD < dist < -self.D_THRESHOLD_SOFT:
+            
+            if self.best_ask <= fv:
+                for ask_price, ask_vol in self.mkt_sell_orders.items():
+                    if ask_price <= fv:
+                        self.bid(ask_price, ask_vol)
+                        
+            if self.best_bid < fv - 1:
+                self.bid(self.best_bid + 1, self.max_allowed_buy_volume)
+            else:
+                self.bid(fv - 7, self.max_allowed_buy_volume)
+
+        # Within band → fill mispriced orders on both sides, then rest both
+        else:
+            
+            if self.best_bid >= fv and self.initial_position > 0:
+                for bid_price, bid_vol in self.mkt_buy_orders.items():
+                    if bid_price >= fv:
+                        self.ask(bid_price, bid_vol)
+            
+            elif self.best_ask <= fv and self.initial_position < 0:
+                for ask_price, ask_vol in self.mkt_sell_orders.items():
+                    if ask_price <= fv:
+                        self.bid(ask_price, ask_vol)
+            
+            else:
+                self.bid(self.best_bid + 1, self.max_allowed_buy_volume)
+                self.ask(self.best_ask - 1, self.max_allowed_sell_volume)
+
+        self.log("FV",   fv)
+        self.log("DIST", round(dist, 2))
+        self.log("POS",  self.initial_position)
 
         return {self.name: self.orders}
 
 
-# -----------------------------------------------------------------------------
-# Option / Velvet trader — REWORKED
-# -----------------------------------------------------------------------------
 class OptionTrader:
     """
-    Replaces IV-smile fitting with a per-option rolling linear regression of
-    option mid (max-vol mid) on the underlying mid.
+    Unified 500-tick z-score strategy for VELVETFRUIT_EXTRACT and all VEV options.
 
-    Why this works on this dataset:
-      * Deep ITM (VEV_4000, VEV_4500) trade essentially at intrinsic.
-        A linear fit recovers slope ≈ 1.0, intercept ≈ -K, giving FV ≈ S - K.
-      * For mid-strike calls (5000-5400) the within-day relationship is very
-        stable — residual std is 0.2–0.6 ticks. A rolling window absorbs
-        theta decay automatically, so we don't need to know TTE.
-      * IV inversion is bypassed entirely. There's no Vega-blowup on deep
-        ITM and no boundary issues on far OTM.
+    Entry (flat position only):
+      z >  3.0 → aggressive short: sell at best_bid
+      z >  2.0 → passive short: fill bids >= fv
+      z < -3.0 → aggressive long: buy at best_ask
+      z < -2.0 → passive long: fill asks <= fv
+      |z| <= 2 → no trade
 
-    Per option, every tick we:
-      1. Append (S_now, C_now) to a rolling history (kept in traderData).
-      2. Once we have >= MIN_HISTORY points, OLS fit C = a + b*S.
-      3. fv_pred = a + b*S_now ; res_std = std of in-window residuals.
-      4. TAKE: lift bids > fv_pred + take_threshold; hit asks < fv_pred - take_threshold.
-      5. POST: resting bid at fv_pred - half_spread and ask at fv_pred + half_spread,
-         clipped to be inside the current book.
+    Hold: position non-zero, exit condition not met → no orders.
 
-    The underlying VELVETFRUIT_EXTRACT runs the same z-score mean reversion
-    you already had.
+    Exit:
+      pos < 0 and z < 0 → buy back: fill asks <= fv + rest bid at best_bid + 1
+      pos > 0 and z > 0 → sell down: fill bids >= fv + rest ask at best_ask - 1
+      Exit volume capped to abs(initial_position) to prevent direction flip.
     """
 
-    # --- option regression knobs ---
-    HIST_WINDOW = 200          # rolling window length in ticks
-    MIN_HISTORY = 60           # need this many points before we trust the fit
-    TAKE_K = 2.0               # take when |price - fv| > TAKE_K * res_std
-    POST_K = 1.5               # post resting quotes at fv ± POST_K * res_std
-    MIN_RES_STD = 0.5          # floor on residual std (avoid over-trading on noise)
-    MIN_HALF_SPREAD = 1.0      # never post tighter than this
-    MAX_HALF_SPREAD = 8.0      # cap so we still post on deep-ITM with huge market spreads
-
-    # --- velvet underlying knobs (unchanged from your last version) ---
-    SMA_WINDOW = 200
-    ZSCORE_THRESHOLD = 3
+    ZSCORE_LOOKBACK = 500
+    ZSCORE_THR_SOFT = 2.0
+    ZSCORE_THR_HARD = 3.0
 
     def __init__(self, state: TradingState, prints: dict, new_trader_data: dict):
         self.state = state
         self.prints = prints
         self.new_trader_data = new_trader_data
 
-        self.options = [
-            ProductTrader(sym, state, prints, new_trader_data, product_group=sym)
-            for sym in OPTION_SYMBOLS
+        self.instruments: list[ProductTrader] = [
+            ProductTrader(VELVET_SYMBOL, state, prints, new_trader_data, product_group="VELVET"),
+            ProductTrader(INFORMED_MM_OPTION_SYMBOL, state, prints, new_trader_data, product_group="OPTION"),
+            ProductTrader(MM_OPTION_SYMBOL, state, prints, new_trader_data, product_group="OPTION"),
+        ] + [
+            ProductTrader(sym, state, prints, new_trader_data, product_group="OPTION")
+            for sym in ATM_OPTION_SYMBOLS
         ]
-        self.underlying = ProductTrader(
-            VELVET_SYMBOL, state, prints, new_trader_data, product_group="VELVET"
-        )
 
-        self.last_traderData: dict = self.underlying.last_traderData
+        self.last_traderData: dict = self.instruments[0].last_traderData
 
-    # ------------------------------------------------------------------
-    # Per-option rolling regression
-    # ------------------------------------------------------------------
-    def _option_fv(self, option: ProductTrader, S: float) -> tuple:
-        """
-        Returns (fv_pred, res_std, slope, n_points) using rolling regression.
-        If history is insufficient, returns (None, None, None, n_points).
-        """
-        key = f"hist_{option.name}"
-        history: list = self.last_traderData.get(key, [])
-
-        # Append this tick's observation if both sides exist
-        if option.fv is not None and S is not None:
-            history.append([float(S), float(option.fv)])
-            history = history[-self.HIST_WINDOW:]
+    def _get_z_score_for(self, key: str, price: float) -> tuple[float, float]:
+        history: list = list(self.last_traderData.get(key, []))
+        history.append(price)
+        history = history[-self.ZSCORE_LOOKBACK:]
         self.new_trader_data[key] = history
-
         n = len(history)
-        if n < self.MIN_HISTORY:
-            return None, None, None, n
-
-        arr = np.array(history, dtype=float)
-        x = arr[:, 0]
-        y = arr[:, 1]
-
-        # Guard against degenerate fit when S barely moves
-        if x.std() < 1e-6:
-            fv_pred = float(y.mean())
-            res_std = float(y.std())
-            return fv_pred, max(res_std, self.MIN_RES_STD), 0.0, n
-
-        # OLS via polyfit deg=1
-        try:
-            slope, intercept = np.polyfit(x, y, 1)
-        except Exception:
-            return None, None, None, n
-
-        fv_pred = float(slope * S + intercept)
-        residuals = y - (slope * x + intercept)
-        res_std = float(residuals.std())
-        res_std = max(res_std, self.MIN_RES_STD)
-
-        return fv_pred, res_std, float(slope), n
-
-    def _trade_option(self, option: ProductTrader, fv: float, res_std: float) -> None:
-        """Take mispriced quotes then post resting quotes around fv."""
-        if option.best_bid is None or option.best_ask is None:
-            return
-
-        take_threshold = self.TAKE_K * res_std
-        half_spread = max(self.MIN_HALF_SPREAD, min(self.POST_K * res_std, self.MAX_HALF_SPREAD))
-
-        # 1) TAKE — sell into bids above fv + threshold
-        for bid_price, bid_vol in option.mkt_buy_orders.items():
-            if bid_price >= fv + take_threshold:
-                option.ask(bid_price, bid_vol)
-            else:
-                break  # mkt_buy_orders is sorted high → low
-
-        # 2) TAKE — buy from asks below fv - threshold
-        for ask_price, ask_vol in option.mkt_sell_orders.items():
-            if ask_price <= fv - take_threshold:
-                option.bid(ask_price, ask_vol)
-            else:
-                break  # mkt_sell_orders is sorted low → high
-
-        # 3) POST — resting quotes around fv, but always inside the current book
-        post_bid_price = int(np.floor(fv - half_spread))
-        post_ask_price = int(np.ceil(fv + half_spread))
-
-        # Only post if it's a price improvement and still on the right side of fv
-        if post_bid_price > option.best_bid and post_bid_price < fv:
-            option.bid(post_bid_price, option.max_allowed_buy_volume)
-        elif option.best_bid + 1 < fv - self.MIN_HALF_SPREAD:
-            # fall-back: just join one tick inside best bid if it's safely below fv
-            option.bid(option.best_bid + 1, option.max_allowed_buy_volume)
-
-        if post_ask_price < option.best_ask and post_ask_price > fv:
-            option.ask(post_ask_price, option.max_allowed_sell_volume)
-        elif option.best_ask - 1 > fv + self.MIN_HALF_SPREAD:
-            option.ask(option.best_ask - 1, option.max_allowed_sell_volume)
-
-    # ------------------------------------------------------------------
-    # Underlying — kept as your z-score mean reversion
-    # ------------------------------------------------------------------
-    def _trade_underlying(self, S: float) -> None:
-        history: list = self.last_traderData.get("velvet_prices", [])
-        history.append(S)
-        history = history[-self.SMA_WINDOW:]
-        self.new_trader_data["velvet_prices"] = history
-
-        if len(history) < self.SMA_WINDOW:
-            return
-        if self.underlying.best_bid is None or self.underlying.best_ask is None:
-            return
-
-        arr = np.array(history, dtype=float)
-        sma = arr.mean()
-        std = arr.std()
+        if n < 10:
+            return 0.0, price
+        sma = sum(history) / n
+        variance = sum((x - sma) ** 2 for x in history) / n
+        std = variance ** 0.5
         if std < 1e-9:
+            return 0.0, sma
+        return (price - sma) / std, sma
+
+    def _apply_zscore_strategy(self, t: ProductTrader) -> None:
+        if t.best_bid is None or t.best_ask is None or t.fv is None:
             return
 
-        zscore = (S - sma) / std
-        pos = self.underlying.initial_position
+        zscore, sma = self._get_z_score_for(f"{t.name}_zs", t.fv)
+        pos = t.initial_position
 
-        self.underlying.log("ZSCORE", round(zscore, 4))
-        self.underlying.log("SMA", round(sma, 2))
+        if pos < 0 and zscore < 0:
+            # EXIT SHORT: buy back up to abs(pos)
+            close_vol = abs(pos)
+            for ask_price, ask_vol in t.mkt_sell_orders.items():
+                if ask_price <= t.fv:
+                    t.bid(ask_price, ask_vol)
 
-        if zscore >= self.ZSCORE_THRESHOLD:
-            self.underlying.ask(self.underlying.best_bid, self.underlying.mkt_buy_orders[self.underlying.best_bid])
-            self.underlying.ask(self.underlying.best_ask - 1, self.underlying.max_allowed_sell_volume)
-        elif zscore <= -self.ZSCORE_THRESHOLD:
-            self.underlying.bid(self.underlying.best_ask, self.underlying.mkt_sell_orders[self.underlying.best_ask])
-            self.underlying.bid(self.underlying.best_bid + 1, self.underlying.max_allowed_buy_volume)
-        else:
-            # Inventory offload via mispriced orders
-            if pos > 0:
-                for bid_price, bid_vol in self.underlying.mkt_buy_orders.items():
-                    if bid_price > S:
-                        self.underlying.ask(bid_price, bid_vol)
-            elif pos < 0:
-                for ask_price, ask_vol in self.underlying.mkt_sell_orders.items():
-                    if ask_price < S:
-                        self.underlying.bid(ask_price, ask_vol)
+        elif pos > 0 and zscore > 0:
+            # EXIT LONG: sell down to flat
+            for bid_price, bid_vol in t.mkt_buy_orders.items():
+                if bid_price >= t.fv:
+                    t.ask(bid_price, bid_vol)
 
-    # ------------------------------------------------------------------
-    # Main entry point
-    # ------------------------------------------------------------------
+        if zscore > self.ZSCORE_THR_HARD:
+            # ENTRY aggressive short
+            t.ask(t.best_bid, t.mkt_buy_orders[t.best_bid])
+
+        elif zscore > self.ZSCORE_THR_SOFT:
+            # ENTRY passive short
+            for bid_price, bid_vol in t.mkt_buy_orders.items():
+                if bid_price >= t.fv:
+                    t.ask(bid_price, bid_vol)
+
+        elif zscore < -self.ZSCORE_THR_HARD:
+            # ENTRY aggressive long
+            t.bid(t.best_ask, t.mkt_sell_orders[t.best_ask])
+
+        elif zscore < -self.ZSCORE_THR_SOFT:
+            # ENTRY passive long
+            for ask_price, ask_vol in t.mkt_sell_orders.items():
+                if ask_price <= t.fv:
+                    t.bid(ask_price, ask_vol)
+
+        t.log("Z",   round(zscore, 4))
+        t.log("SMA", round(sma, 2))
+        t.log("POS", pos)
+
     def get_orders(self) -> dict:
         result: dict = {}
-
-        S = self.underlying.fv
-        if S is None or S <= 0:
-            for option in self.options:
-                result[option.name] = option.orders
-            result[self.underlying.name] = self.underlying.orders
-            return result
-
-        # --- Options: rolling regression FV per strike ---
-        for option in self.options:
-            fv_pred, res_std, slope, n_pts = self._option_fv(option, S)
-
-            if fv_pred is None or res_std is None:
-                # Not enough history yet — sit out this tick
-                option.log("warmup", n_pts, product_group=option.name)
-                result[option.name] = option.orders
-                continue
-
-            # Sanity check: deep ITM should give slope ≈ 1, ATM in (0, 1)
-            # Reject obviously broken fits
-            if slope is not None and (slope < -0.1 or slope > 1.5):
-                option.log("bad_slope", round(slope, 3), product_group=option.name)
-                result[option.name] = option.orders
-                continue
-
-            self._trade_option(option, fv_pred, res_std)
-
-            option.log("FV", round(fv_pred, 2), product_group=option.name)
-            option.log("RSD", round(res_std, 2), product_group=option.name)
-            option.log("BETA", round(slope if slope is not None else 0.0, 3), product_group=option.name)
-            option.log("POS", option.initial_position, product_group=option.name)
-
-            result[option.name] = option.orders
-
-        # --- Underlying: z-score mean reversion ---
-        self._trade_underlying(S)
-        result[self.underlying.name] = self.underlying.orders
-
+        for t in self.instruments:
+            self._apply_zscore_strategy(t)
+            result[t.name] = t.orders
         return result
 
 
-# -----------------------------------------------------------------------------
-# Top-level Trader
-# -----------------------------------------------------------------------------
 class Trader:
 
     def run(self, state: TradingState):
