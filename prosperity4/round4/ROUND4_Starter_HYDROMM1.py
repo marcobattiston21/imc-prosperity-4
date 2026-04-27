@@ -5,37 +5,18 @@ from typing import List
 HYDROGEL_SYMBOL = "HYDROGEL_PACK"
 VELVET_SYMBOL = "VELVETFRUIT_EXTRACT"
 
-ATM_OPTION_SYMBOLS = [
-    "VEV_5000",
-    "VEV_5100",
-    "VEV_5200",
-    "VEV_5300",
-    "VEV_5400",
-]
-
-MM_OPTION_SYMBOL          = "VEV_4500"   # simple MM
-INFORMED_MM_OPTION_SYMBOL = "VEV_4000"   # MM gated by informed trader
-
-USELESS_OPTIONS_SYMBOLS = [
-    "VEV_5500",
-    "VEV_6000",
-    "VEV_6500",
-]
+ITM_OPTION_SYMBOLS = ["VEV_4000", "VEV_4500"]
+ATM_OPTION_SYMBOLS = ["VEV_5000", "VEV_5100", "VEV_5200", "VEV_5300", "VEV_5400", "VEV_5500"]
+OTM_OPTION_SYMBOLS = ["VEV_6000", "VEV_6500"]
 
 POS_LIMITS = {
     HYDROGEL_SYMBOL: 200,
     VELVET_SYMBOL: 200,
+    **{sym: 300 for sym in ITM_OPTION_SYMBOLS},
     **{sym: 300 for sym in ATM_OPTION_SYMBOLS},
-    MM_OPTION_SYMBOL: 300,
-    INFORMED_MM_OPTION_SYMBOL: 300,
+    **{sym: 300 for sym in OTM_OPTION_SYMBOLS},
 }
 
-INFORMED_TRADER_ID = "Mark 14"
-INFORMED_WINDOW = 500   # 5 timestamps × 100 ms each
-
-NEUTRAL = 0
-LONG = 1
-SHORT = -1
 
 
 class ProductTrader:
@@ -166,63 +147,11 @@ class ProductTrader:
         group[kind] = message
         self.prints[group_key] = group
 
-    def check_for_informed(self) -> int:
-        """
-        Returns LONG, SHORT, or NEUTRAL based on whether the informed trader
-        traded this product in the last 5 timestamps (INFORMED_WINDOW ms).
-        Timestamps are stored as rolling lists keyed by '{name}_informed'.
-        """
-        key = self.name + "_informed"
-        saved = self.last_traderData.get(key, {"buys": [], "sells": []})
-        buy_timestamps: list = list(saved.get("buys", []))
-        sell_timestamps: list = list(saved.get("sells", []))
-
-        trades = (
-            self.state.market_trades.get(self.name, [])
-            + self.state.own_trades.get(self.name, [])
-        )
-        for trade in trades:
-            if trade.buyer == INFORMED_TRADER_ID:
-                buy_timestamps.append(trade.timestamp)
-            if trade.seller == INFORMED_TRADER_ID:
-                sell_timestamps.append(trade.timestamp)
-
-        current_ts = self.state.timestamp
-        buy_timestamps  = [ts for ts in buy_timestamps  if current_ts - ts <= INFORMED_WINDOW]
-        sell_timestamps = [ts for ts in sell_timestamps if current_ts - ts <= INFORMED_WINDOW]
-
-        self.new_trader_data[key] = {"buys": buy_timestamps, "sells": sell_timestamps}
-
-        informed_bought = len(buy_timestamps) > 0
-        informed_sold   = len(sell_timestamps) > 0
-
-        if informed_bought and not informed_sold:
-            direction = LONG
-        elif informed_sold and not informed_bought:
-            direction = SHORT
-        elif informed_bought and informed_sold:
-            if max(buy_timestamps) > max(sell_timestamps):
-                direction = LONG
-            elif max(sell_timestamps) > max(buy_timestamps):
-                direction = SHORT
-            else:
-                direction = NEUTRAL
-        else:
-            direction = NEUTRAL
-
-        self.log("TD", {"buys": buy_timestamps, "sells": sell_timestamps})
-        self.log("ID", direction)
-        return direction
-
     def get_orders(self) -> dict:
         return {}
 
 
 class HydrogelTrader(ProductTrader):
-
-    MEAN = 9994
-    D_THRESHOLD_SOFT = 20    # distance (FV - mean) that switches regime
-    D_THRESHOLD_HARD = 50
 
     def __init__(self, state: TradingState, prints: dict, new_trader_data: dict):
         super().__init__(HYDROGEL_SYMBOL, state, prints, new_trader_data)
@@ -233,112 +162,55 @@ class HydrogelTrader(ProductTrader):
             return {self.name: self.orders}
 
         fv = self.fv
-        dist = fv - self.MEAN
 
-        # Price well above mean → short-side focus: fill best bids, rest ask
-        if dist > self.D_THRESHOLD_HARD:
+        if self.best_ask <= fv + 1:
+            self.bid(self.best_ask, self.mkt_sell_orders[self.best_ask])
+        elif self.best_bid >= fv - 1:
             self.ask(self.best_bid, self.mkt_buy_orders[self.best_bid])
+        
+        else:
+            self.bid(self.best_bid + 1, self.max_allowed_buy_volume)
             self.ask(self.best_ask - 1, self.max_allowed_sell_volume)
 
-        # Price well below mean → long-side focus: fill best asks, rest bid
-        elif dist < -self.D_THRESHOLD_HARD:
-            self.bid(self.best_ask, self.mkt_sell_orders[self.best_ask])
-            self.bid(self.best_bid + 1, self.max_allowed_buy_volume)
-
-        elif self.D_THRESHOLD_SOFT < dist < self.D_THRESHOLD_HARD:
-            
-            if self.best_bid >= fv:
-                for bid_price, bid_vol in self.mkt_buy_orders.items():
-                    if bid_price >= fv:
-                        self.ask(bid_price, bid_vol)
-
-            if self.best_ask > fv + 1:
-                self.ask(self.best_ask - 1, self.max_allowed_sell_volume)
-            else:
-                self.ask(fv + 7, self.max_allowed_sell_volume)
-        
-        elif -self.D_THRESHOLD_HARD < dist < -self.D_THRESHOLD_SOFT:
-            
-            if self.best_ask <= fv:
-                for ask_price, ask_vol in self.mkt_sell_orders.items():
-                    if ask_price <= fv:
-                        self.bid(ask_price, ask_vol)
-                        
-            if self.best_bid < fv - 1:
-                self.bid(self.best_bid + 1, self.max_allowed_buy_volume)
-            else:
-                self.bid(fv - 7, self.max_allowed_buy_volume)
-
-        # Within band → fill mispriced orders on both sides, then rest both
-        else:
-            
-            if self.best_bid >= fv and self.initial_position > 0:
-                for bid_price, bid_vol in self.mkt_buy_orders.items():
-                    if bid_price >= fv:
-                        self.ask(bid_price, bid_vol)
-            
-            elif self.best_ask <= fv and self.initial_position < 0:
-                for ask_price, ask_vol in self.mkt_sell_orders.items():
-                    if ask_price <= fv:
-                        self.bid(ask_price, ask_vol)
-            
-            else:
-                self.bid(self.best_bid + 1, self.max_allowed_buy_volume)
-                self.ask(self.best_ask - 1, self.max_allowed_sell_volume)
-
         self.log("FV",   fv)
-        self.log("DIST", round(dist, 2))
         self.log("POS",  self.initial_position)
 
         return {self.name: self.orders}
 
 
 class OptionTrader:
-    """
-    Unified 500-tick z-score strategy for VELVETFRUIT_EXTRACT and all VEV options.
 
-    Entry (flat position only):
-      z >  3.0 → aggressive short: sell at best_bid
-      z >  2.0 → passive short: fill bids >= fv
-      z < -3.0 → aggressive long: buy at best_ask
-      z < -2.0 → passive long: fill asks <= fv
-      |z| <= 2 → no trade
-
-    Hold: position non-zero, exit condition not met → no orders.
-
-    Exit:
-      pos < 0 and z < 0 → buy back: fill asks <= fv + rest bid at best_bid + 1
-      pos > 0 and z > 0 → sell down: fill bids >= fv + rest ask at best_ask - 1
-      Exit volume capped to abs(initial_position) to prevent direction flip.
-    """
-
-    ZSCORE_LOOKBACK = 500
-    ZSCORE_THR_SOFT = 2.0
-    ZSCORE_THR_HARD = 3.0
+    LOOKBACK = 200    # rolling window length (ticks)
+    ENTRY_Z  = 3.0    # enter when |z| exceeds this
 
     def __init__(self, state: TradingState, prints: dict, new_trader_data: dict):
         self.state = state
         self.prints = prints
         self.new_trader_data = new_trader_data
 
+        all_symbols = (
+            [VELVET_SYMBOL]
+            + ATM_OPTION_SYMBOLS
+        )
+
         self.instruments: list[ProductTrader] = [
-            ProductTrader(VELVET_SYMBOL, state, prints, new_trader_data, product_group="VELVET"),
-            ProductTrader(INFORMED_MM_OPTION_SYMBOL, state, prints, new_trader_data, product_group="OPTION"),
-            ProductTrader(MM_OPTION_SYMBOL, state, prints, new_trader_data, product_group="OPTION"),
-        ] + [
-            ProductTrader(sym, state, prints, new_trader_data, product_group="OPTION")
-            for sym in ATM_OPTION_SYMBOLS
+            ProductTrader(sym, state, prints, new_trader_data)
+            for sym in all_symbols
         ]
 
+        self.itm_instruments: list[ProductTrader] = [
+            ProductTrader(sym, state, prints, new_trader_data)
+            for sym in ITM_OPTION_SYMBOLS
+        ]
         self.last_traderData: dict = self.instruments[0].last_traderData
 
-    def _get_z_score_for(self, key: str, price: float) -> tuple[float, float]:
+    def _get_z_score(self, key: str, price: float) -> tuple[float, float]:
         history: list = list(self.last_traderData.get(key, []))
         history.append(price)
-        history = history[-self.ZSCORE_LOOKBACK:]
+        history = history[-self.LOOKBACK:]
         self.new_trader_data[key] = history
         n = len(history)
-        if n < 10:
+        if n < 200:
             return 0.0, price
         sma = sum(history) / n
         variance = sum((x - sma) ** 2 for x in history) / n
@@ -347,54 +219,55 @@ class OptionTrader:
             return 0.0, sma
         return (price - sma) / std, sma
 
-    def _apply_zscore_strategy(self, t: ProductTrader) -> None:
+    def _apply_mean_reversion(self, t: ProductTrader) -> None:
         if t.best_bid is None or t.best_ask is None or t.fv is None:
             return
 
-        zscore, sma = self._get_z_score_for(f"{t.name}_zs", t.fv)
-        pos = t.initial_position
+        z, sma = self._get_z_score(t.name, t.fv)
 
-        if pos < 0 and zscore < 0:
-            # EXIT SHORT: buy back up to abs(pos)
-            close_vol = abs(pos)
-            for ask_price, ask_vol in t.mkt_sell_orders.items():
-                if ask_price <= t.fv:
-                    t.bid(ask_price, ask_vol)
+        if z == 0.0:
+            return
 
-        elif pos > 0 and zscore > 0:
-            # EXIT LONG: sell down to flat
-            for bid_price, bid_vol in t.mkt_buy_orders.items():
-                if bid_price >= t.fv:
-                    t.ask(bid_price, bid_vol)
-
-        if zscore > self.ZSCORE_THR_HARD:
-            # ENTRY aggressive short
+        # Accumulate shorts
+        if z >= self.ENTRY_Z:
+            # ENTRY short: price stretched above mean
             t.ask(t.best_bid, t.mkt_buy_orders[t.best_bid])
+            t.ask(t.best_ask - 1, t.max_allowed_sell_volume)
 
-        elif zscore > self.ZSCORE_THR_SOFT:
-            # ENTRY passive short
-            for bid_price, bid_vol in t.mkt_buy_orders.items():
-                if bid_price >= t.fv:
-                    t.ask(bid_price, bid_vol)
-
-        elif zscore < -self.ZSCORE_THR_HARD:
-            # ENTRY aggressive long
+        # Accumulate longs
+        elif z <= -self.ENTRY_Z:
+            # ENTRY long: price stretched below mean
             t.bid(t.best_ask, t.mkt_sell_orders[t.best_ask])
+            t.bid(t.best_bid + 1, t.max_allowed_buy_volume)
+        
 
-        elif zscore < -self.ZSCORE_THR_SOFT:
-            # ENTRY passive long
-            for ask_price, ask_vol in t.mkt_sell_orders.items():
-                if ask_price <= t.fv:
-                    t.bid(ask_price, ask_vol)
 
-        t.log("Z",   round(zscore, 4))
+        t.log("Z",   round(z, 3))
         t.log("SMA", round(sma, 2))
-        t.log("POS", pos)
+        t.log("POS", t.initial_position)
+
+    def _apply_market_making(self, t: ProductTrader) -> None:
+
+        if t.best_bid is None or t.best_ask is None or t.fv is None:
+            return
+        
+        # Just market make at bb + 2 and ba - 2
+        if t.best_bid < t.fv - 2:
+            t.bid(t.best_bid + 2, t.max_allowed_buy_volume)
+        if t.best_ask > t.fv + 2:
+            t.ask(t.best_ask - 2, t.max_allowed_sell_volume)
 
     def get_orders(self) -> dict:
         result: dict = {}
+
+        # Mean Reversion instruments
         for t in self.instruments:
-            self._apply_zscore_strategy(t)
+            self._apply_mean_reversion(t)
+            result[t.name] = t.orders
+        
+        # Market Making Instruments
+        for t in self.itm_instruments:
+            self._apply_market_making(t)
             result[t.name] = t.orders
         return result
 
