@@ -2,22 +2,9 @@ from datamodel import OrderDepth, TradingState, Order
 import json
 from typing import List
 
-HYDROGEL_SYMBOL = "HYDROGEL_PACK"
-VELVET_SYMBOL = "VELVETFRUIT_EXTRACT"
-
-ITM_OPTION_SYMBOLS = ["VEV_4000", "VEV_4500"]
-ATM_OPTION_SYMBOLS = ["VEV_5000", "VEV_5100", "VEV_5200", "VEV_5300", "VEV_5400"]
-OTM_OPTION_SYMBOLS = ["VEV_5500", "VEV_6000", "VEV_6500"]
-
-POS_LIMITS = {
-    HYDROGEL_SYMBOL: 200,
-    VELVET_SYMBOL: 200,
-    **{sym: 300 for sym in ITM_OPTION_SYMBOLS},
-    **{sym: 300 for sym in ATM_OPTION_SYMBOLS},
-    **{sym: 300 for sym in OTM_OPTION_SYMBOLS},
-}
-
-
+'''
+HERE DEFINE THE POSITION LIMITS, THE NAME OF THE PRODUCT AS LISTS DEPENDING ON THE GROUPS
+'''
 
 class ProductTrader:
 
@@ -151,174 +138,6 @@ class ProductTrader:
         return {}
 
 
-class HydrogelTrader(ProductTrader):
-    MEAN = 9995
-    SOFT_THRESHOLD = 30
-    HARD_THRESHOLD = 60
-    TAKE_THRESHOLD = 2
-    HALF_SPREAD    = 7
-
-    def __init__(self, state: TradingState, prints: dict, new_trader_data: dict):
-        super().__init__(HYDROGEL_SYMBOL, state, prints, new_trader_data)
-
-    def get_orders(self) -> dict:
-        if self.best_bid is None or self.best_ask is None or self.spread is None:
-            return {self.name: self.orders}
-
-        fv = self.fv
-
-        aggressive_selling  = fv >= self.MEAN + self.HARD_THRESHOLD
-        soft_selling        = self.MEAN + self.SOFT_THRESHOLD <  fv <  self.MEAN + self.HARD_THRESHOLD
-        normal_mm           = self.MEAN - self.SOFT_THRESHOLD <= fv <= self.MEAN + self.SOFT_THRESHOLD
-        soft_buying         = self.MEAN - self.HARD_THRESHOLD <  fv <  self.MEAN - self.SOFT_THRESHOLD
-        aggressive_buying   = fv <= self.MEAN - self.HARD_THRESHOLD
-
-        if normal_mm:
-            if self.best_bid >= (fv - self.TAKE_THRESHOLD):
-                for bid_price, bid_volume in self.mkt_buy_orders.items():
-                    if bid_price >= (fv - self.TAKE_THRESHOLD):
-                        self.ask(bid_price, bid_volume)
-                self.bid(fv - self.HALF_SPREAD, self.max_allowed_buy_volume)
-                self.ask(self.best_ask - 1, self.max_allowed_sell_volume)
-            elif self.best_ask <= (fv + self.TAKE_THRESHOLD):
-                for ask_price, ask_volume in self.mkt_sell_orders.items():
-                    if ask_price <= (fv + self.TAKE_THRESHOLD):
-                        self.bid(ask_price, ask_volume)
-                self.bid(self.best_bid + 1, self.max_allowed_buy_volume)
-                self.ask(fv + self.HALF_SPREAD, self.max_allowed_sell_volume)
-            else:
-                self.bid(self.best_bid + 1, self.max_allowed_buy_volume)
-                self.ask(self.best_ask - 1, self.max_allowed_sell_volume)
-
-        elif soft_selling:
-            if self.best_bid >= (fv - self.TAKE_THRESHOLD):
-                for bid_price, bid_volume in self.mkt_buy_orders.items():
-                    if bid_price >= (fv - self.TAKE_THRESHOLD):
-                        self.ask(bid_price, bid_volume)
-            if self.initial_position < 0 and self.best_ask <= (fv + self.TAKE_THRESHOLD):
-                self.bid(self.best_ask, self.mkt_sell_orders[self.best_ask])
-                self.ask(fv + self.HALF_SPREAD, self.max_allowed_sell_volume)
-            else:
-                self.ask(self.best_ask - 1, self.max_allowed_sell_volume)
-
-        elif soft_buying:
-            if self.best_ask <= (fv + self.TAKE_THRESHOLD):
-                for ask_price, ask_volume in self.mkt_sell_orders.items():
-                    if ask_price <= (fv + self.TAKE_THRESHOLD):
-                        self.bid(ask_price, ask_volume)
-            if self.initial_position > 0 and self.best_bid >= (fv - self.TAKE_THRESHOLD):
-                self.ask(self.best_bid, self.mkt_buy_orders[self.best_bid])
-                self.bid(fv - self.HALF_SPREAD, self.max_allowed_buy_volume)
-            else:
-                self.bid(self.best_bid + 1, self.max_allowed_buy_volume)
-
-        elif aggressive_selling:
-            self.ask(self.best_bid, self.mkt_buy_orders[self.best_bid])
-            self.ask(self.best_ask - 1, self.max_allowed_sell_volume)
-
-        elif aggressive_buying:
-            self.bid(self.best_ask, self.mkt_sell_orders[self.best_ask])
-            self.bid(self.best_bid + 1, self.max_allowed_buy_volume)
-
-        self.log("FV",   fv)
-        self.log("POS",  self.initial_position)
-
-        return {self.name: self.orders}
-
-
-class OptionTrader:
-
-    LOOKBACK = 300    # rolling window length (ticks)
-    ENTRY_Z  = 3.0    # enter when |z| exceeds this
-
-    def __init__(self, state: TradingState, prints: dict, new_trader_data: dict):
-        self.state = state
-        self.prints = prints
-        self.new_trader_data = new_trader_data
-
-        all_symbols = (
-            [VELVET_SYMBOL]
-            + ATM_OPTION_SYMBOLS
-        )
-
-        self.instruments: list[ProductTrader] = [
-            ProductTrader(sym, state, prints, new_trader_data)
-            for sym in all_symbols
-        ]
-
-        self.itm_instruments: list[ProductTrader] = [
-            ProductTrader(sym, state, prints, new_trader_data)
-            for sym in ITM_OPTION_SYMBOLS
-        ]
-        self.last_traderData: dict = self.instruments[0].last_traderData
-
-    def _get_z_score(self, key: str, price: float) -> tuple[float, float]:
-        history: list = list(self.last_traderData.get(key, []))
-        history.append(price)
-        history = history[-self.LOOKBACK:]
-        self.new_trader_data[key] = history
-        n = len(history)
-        if n < 300:
-            return 0.0, price
-        sma = sum(history) / n
-        variance = sum((x - sma) ** 2 for x in history) / n
-        std = variance ** 0.5
-        if std < 1e-9:
-            return 0.0, sma
-        return (price - sma) / std, sma
-
-    def _apply_mean_reversion(self, t: ProductTrader) -> None:
-        if t.best_bid is None or t.best_ask is None or t.fv is None:
-            return
-
-        z, sma = self._get_z_score(t.name, t.fv)
-
-        if z == 0.0:
-            return
-
-        # Accumulate shorts
-        if z >= self.ENTRY_Z:
-            # ENTRY short: price stretched above mean
-            t.ask(t.best_bid, t.mkt_buy_orders[t.best_bid])
-            t.ask(t.best_ask - 1, t.max_allowed_sell_volume)
-
-        # Accumulate longs
-        elif z <= -self.ENTRY_Z:
-            # ENTRY long: price stretched below mean
-            t.bid(t.best_ask, t.mkt_sell_orders[t.best_ask])
-            t.bid(t.best_bid + 1, t.max_allowed_buy_volume)
-        
-
-
-        t.log("Z",   round(z, 3))
-        t.log("SMA", round(sma, 2))
-        t.log("POS", t.initial_position)
-
-    def _apply_market_making(self, t: ProductTrader) -> None:
-
-        if t.best_bid is None or t.best_ask is None or t.fv is None:
-            return
-        
-        # Just market make at bb + 2 and ba - 2
-        if t.best_bid < t.fv - 1:
-            t.bid(t.best_bid + 1, t.max_allowed_buy_volume)
-        if t.best_ask > t.fv + 1:
-            t.ask(t.best_ask - 1, t.max_allowed_sell_volume)
-
-    def get_orders(self) -> dict:
-        result: dict = {}
-
-        # Mean Reversion instruments
-        for t in self.instruments:
-            self._apply_mean_reversion(t)
-            result[t.name] = t.orders
-        
-        # Market Making Instruments
-        for t in self.itm_instruments:
-            self._apply_market_making(t)
-            result[t.name] = t.orders
-        return result
-
 
 class Trader:
 
@@ -330,8 +149,10 @@ class Trader:
         }
 
         product_traders = {
+            '''
             HYDROGEL_SYMBOL: HydrogelTrader,
-            VELVET_SYMBOL: OptionTrader,
+            VELVET_SYMBOL: OptionTrader
+            '''
         }
 
         result: dict = {}
