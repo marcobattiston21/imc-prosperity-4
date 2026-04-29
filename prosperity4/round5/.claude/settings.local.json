@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c ' *)",
+      "Bash(python \"D:\\\\IMC Prosperity 4\\\\Stochastic Bulls\\\\imc-prosperity-4\\\\prosperity4\\\\round5\\\\data\\\\check.py\")",
+      "Bash(python generate_notebooks.py)",
+      "Bash(python generate_crossgroup.py)",
+      "Bash(python \"D:/IMC Prosperity 4/Stochastic Bulls/imc-prosperity-4/prosperity4/round5/notebooks/inspect_data.py\")",
+      "Bash(python3)"
+    ]
+  }
+}
