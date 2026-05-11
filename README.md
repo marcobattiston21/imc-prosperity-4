@@ -168,21 +168,21 @@ PnL curve:
 
 ### <a id="manual-round-1"></a>[Round 1 — Exchange Auction](#manual-round-1)
 
-Round 1 presented two opening auctions — **Dryland Flax** and **Ember Mushrooms** — where we had to submit a single limit order (price, quantity) for each product to maximise profit, knowing that any inventory acquired would be immediately bought back by the Merchant Guild at a fixed price.
+Round 1 presented two opening auctions  **Dryland Flax** and **Ember Mushrooms** where we had to submit a single limit order (price, quantity) for each product to maximise profit, knowing that any inventory acquired would be immediately bought back by the Merchant Guild at a fixed price.
 
 The key insight was that profit per unit depended entirely on the spread between the auction clearing price and the guaranteed buyback price, net of any fees. This meant we needed to:
 
-1. **Identify the clearing price** — the price that maximises total traded volume under the auction rules
+1. **Identify the clearing price**  the price that maximises total traded volume under the auction rules
 2. **Bid aggressively enough** to ensure execution, without pushing the clearing price above the buyback price
 3. **Size our order** to absorb as much profitable volume as possible, accounting for our last-in-line priority at any price level we joined
 
 We built a simulator (`analysis.ipynb`) to sweep candidate clearing prices across the full order book for both products, computing executed volume and our resulting PnL at each level.
 
-**Dryland Flax** — Bid 9999 units @31, clearing price @29, buyback @30, no fees:
+**Dryland Flax**: Bid 9999 units @31, clearing price @29, buyback @30, no fees:
 
 <img src="prosperity4/docs/round-1-manual-orderbook-dryland.png" width="900">
 
-**Ember Mushrooms** — Bid 19999 units @18, clearing price @16, buyback @20, fee of 0.10/unit:
+**Ember Mushrooms**: Bid 19999 units @18, clearing price @16, buyback @20, fee of 0.10/unit:
 
 <img src="prosperity4/docs/round-1-manual-orderbook-ember.png" width="900">
 
@@ -195,7 +195,7 @@ Manual results:
 
 ### <a id="manual-round-2"></a>[Round 2 — Capital Allocation](#manual-round-2)
 
-In Round 2, we were given a capital allocation challenge where we had to distribute a budget of 50,000 XIRECs across three interdependent pillars — **Research**, **Scale**, and **Speed** — to maximise a nonlinear PnL function:
+In Round 2, we were given a capital allocation challenge where we had to distribute a budget of 50,000 XIRECs across three interdependent pillars **Research**, **Scale**, and **Speed** to maximise a nonlinear PnL function:
 
 $$
 \text{PnL} = \text{Research}(x_r) \times \text{Scale}(x_s) \times \text{Speed}(x_{sp}) - \text{Budget\_Used}
@@ -209,11 +209,11 @@ $$
 \end{aligned}
 $$
 
-The core difficulty was that each pillar followed a different return structure: Research scaled logarithmically, Scale linearly, and Speed was rank-determined relative to all competing teams — making it the most uncertain and strategically sensitive variable.
+The core difficulty was that each pillar followed a different return structure: Research scaled logarithmically, Scale linearly, and Speed was rank-determined relative to all competing teams, making it the most uncertain and strategically sensitive variable.
 
 Our approach was to tackle the problem in two stages. We first focused on **Speed**, since its multiplier depended entirely on the behaviour of other teams rather than a fixed formula. We analysed the rank-based scoring mechanism and reasoned about likely competitor distributions to arrive at a Speed allocation we were confident would secure a strong relative rank. With that anchor fixed, we then ran a **numerical optimisation** (via `optimizer.html` and `analysis.ipynb`) over the remaining budget to find the Research/Scale split that maximised the product of the two analytically-defined pillars given the leftover capital.
 
-We invested the full budget, landing on a final allocation of **34% Speed, 50% Scale, and 16% Research** — a distribution that prioritised broad market deployment and competitive rank while accepting a modest edge, reflecting the classic market-maker trade-off between reach, speed, and depth of insight.
+We invested the full budget, landing on a final allocation of **34% Speed, 50% Scale, and 16% Research**, a distribution that prioritised broad market deployment and competitive rank while accepting a modest edge, reflecting the classic market-maker trade-off between reach, speed, and depth of insight.
 
 Manual results:
 
@@ -223,16 +223,16 @@ Manual results:
 
 Round 3 required submitting two bids against counterparties with uniformly distributed reserve prices between 670 and 920 (in increments of 5), with any acquired inventory sellable the next day at the fair price of 920.
 
-The profit per unit on any trade was simply `920 − bid`, so the lower we bid, the higher the margin — but the fewer counterparties we would trade with. The real strategic tension lived in the **second bid**, which introduced a rank-based penalty: if our second bid fell below the mean second bid of all players, our PnL on those trades was penalised by a steep cubic factor, making an aggressive-but-below-average second bid potentially worse than not trading at all.
+The profit per unit on any trade was simply `920 − bid`, so the lower we bid, the higher the margin, but the fewer counterparties we would trade with. The real strategic tension lived in the **second bid**, which introduced a rank-based penalty: if our second bid fell below the mean second bid of all players, our PnL on those trades was penalised by a steep cubic factor, making an aggressive-but-below-average second bid potentially worse than not trading at all.
 
 The penalization factor was defined as follows:
 $$ \left(\frac{920 - \text{avg\_b2}}{920 - b2}\right)^3 $$
 
-**A note on bid precision:** since all reserve prices are multiples of 5, any bid ending in 1 or 6 is functionally equivalent to the nearest lower multiple of 5 — a counterparty with reserve price 795 accepts a bid of 796, same as a bid of 799. We therefore deliberately chose values ending in **6** (e.g. 796, 906) to sit just above a clean multiple of 5, capturing every counterparty at that threshold without leaving margin on the table.
+**A note on bid precision:** since all reserve prices are multiples of 5, any bid ending in 1 or 6 is functionally equivalent to the nearest lower multiple of 5, a counterparty with reserve price 795 accepts a bid of 796, same as a bid of 799. We therefore deliberately chose values ending in **6** (e.g. 796, 906) to sit just above a clean multiple of 5, capturing every counterparty at that threshold without leaving margin on the table.
 
-**First bid — 796:** This was intentionally conservative, targeting only counterparties with reserve prices at or below 795 (roughly the lower 26% of the distribution). The margin per unit was a comfortable 124. We were not trying to maximise volume here — the first bid carries no competitive penalty, so we prioritised a reliable, high-margin trade over breadth.
+**First bid — 796:** This was intentionally conservative, targeting only counterparties with reserve prices at or below 795 (roughly the lower 26% of the distribution). The margin per unit was a comfortable 124. We were not trying to maximise volume here. The first bid carries no competitive penalty, so we prioritised a reliable, high-margin trade over breadth.
 
-**Second bid — 906:** This is where the design of the challenge demanded the most careful reasoning. The cubic penalty for finishing below the mean second bid is severe enough that a slightly-below-average bid can actively destroy value. Our thinking was: if most teams reasoned similarly and clustered their second bids in the 880–910 range out of caution, submitting 906 would likely land at or above the mean, avoiding the penalty entirely while still capturing a thin but positive margin of 14/unit across a large share of the distribution. We accepted that this might be overly conservative — a team willing to bid 850 and trust the field would gain significantly more margin — but the asymmetric downside of the penalty made us reluctant to anchor below what we estimated the crowd would do.
+**Second bid — 906:** This is where the design of the challenge demanded the most careful reasoning. The cubic penalty for finishing below the mean second bid is severe enough that a slightly-below-average bid can actively destroy value. Our thinking was: if most teams reasoned similarly and clustered their second bids in the 880–910 range out of caution, submitting 906 would likely land at or above the mean, avoiding the penalty entirely while still capturing a thin but positive margin of 14/unit across a large share of the distribution. We accepted that this might be overly conservative, a team willing to bid 850 and trust the field would gain significantly more margin, but the asymmetric downside of the penalty made us reluctant to anchor below what we estimated the crowd would do.
 
 In hindsight, our allocation was **risk-averse by design**: we prioritised penalty avoidance and margin certainty over volume maximisation, reflecting our belief that in a competitive setting with an opaque penalty structure, staying above the crowd's average was worth more than chasing extra units at lower prices.
 
@@ -242,9 +242,9 @@ Manual results:
 
 ### <a id="manual-round-4"></a>[Round 4 — Exotic Derivatives](#manual-round-4)
 
-Round 4 introduced a rich derivatives universe written on `AETHER_CRYSTAL` — vanilla calls and puts at 2 and 3 week expiries, alongside three exotic structures (a Chooser, a Binary Put, and a Knock-Out Put) — with the objective of constructing a position that maximised expected PnL across 100 simulations of the underlying, held to expiry.
+Round 4 introduced a rich derivatives universe written on `AETHER_CRYSTAL` vanilla calls and puts at 2 and 3 week expiries, alongside three exotic structures (a Chooser, a Binary Put, and a Knock-Out Put) with the objective of constructing a position that maximised expected PnL across 100 simulations of the underlying, held to expiry.
 
-The most immediate signal was the underlying's annualised volatility of **251%** — an extremely high figure that made any unhedged directional exposure dangerous. A naked long or short in the underlying, or an unbalanced options book, could easily see simulated paths swing wildly enough to overwhelm any edge extracted from mispricing. Our primary concern was therefore not just finding positive expected value, but ensuring that delta exposure — our first-order sensitivity to the underlying's moves — was kept tightly controlled.
+The most immediate signal was the underlying's annualised volatility of **251%**, an extremely high figure that made any unhedged directional exposure dangerous. A naked long or short in the underlying, or an unbalanced options book, could easily see simulated paths swing wildly enough to overwhelm any edge extracted from mispricing. Our primary concern was therefore not just finding positive expected value, but ensuring that delta exposure, our first-order sensitivity to the underlying's moves, was kept tightly controlled.
 
 **Modelling the exotics:** We built a dedicated simulation framework in `analysis.ipynb`, implementing Python classes for each product with their precise payoff logic. This was essential for the path-dependent products in particular:
 - The **Knock-Out Put** required tracking whether the barrier was breached at any discrete step before expiry
@@ -284,7 +284,7 @@ Distribution by Derivative:
 
 ### <a id="manual-round-5"></a>[Round 5 — News-Based Trading](#manual-round-5)
 
-Round 5 provided a fictional newspaper — **Ashflow Alpha** — and required us to construct a one-day portfolio based on qualitative news interpretation, with a quadratic fee structure that penalised heavy concentration in any single instrument.
+Round 5 provided a fictional newspaper: **Ashflow Alpha** and required us to construct a one-day portfolio based on qualitative news interpretation, with a quadratic fee structure that penalised heavy concentration in any single instrument.
 
 Our approach was to read each article and classify the signal as bullish, bearish, or ambiguous, then size positions proportionally to our conviction while keeping an eye on the fee drag that would erode returns on large allocations.
 
@@ -292,27 +292,27 @@ Our approach was to read each article and classify the signal as bullish, bearis
 
 **Position-by-position rationale:**
 
-**Magma Ink — BUY 35%:** The largest allocation, driven by the front-page story about the merger between Stip Stationery Enterprises and Splatter Inc. and the launch of the limited-edition Lava Fountain Pen. The crowd queuing for six hours and the "hot drop" framing read as a strong demand signal for Magma Ink as the ink supplier. In hindsight, this was our most costly mistake: the news was likely **already priced in** given how widely the event had been promoted beforehand, and the 35% allocation triggered a fee of 122,500 — making the position nearly impossible to profit from even with a positive underlying return. We over-weighted a sentiment story that the market had already absorbed.
+**Magma Ink, BUY 35%:** The largest allocation, driven by the front-page story about the merger between Stip Stationery Enterprises and Splatter Inc. and the launch of the limited-edition Lava Fountain Pen. The crowd queuing for six hours and the "hot drop" framing read as a strong demand signal for Magma Ink as the ink supplier. In hindsight, this was our most costly mistake: the news was likely **already priced in** given how widely the event had been promoted beforehand, and the 35% allocation triggered a fee of 122,500; making the position nearly impossible to profit from even with a positive underlying return. We over-weighted a sentiment story that the market had already absorbed.
 
-**Thermalite Core — BUY 19%:** The quarterly forecast report showed projected active users nearly doubling next quarter (1.42M to 3.09M) with significantly extended daily usage times — a strong forward-looking demand signal. The position returned modestly (+6,004), likely because the optimistic forecast was partially anticipated by the market already.
+**Thermalite Core, BUY 19%:** The quarterly forecast report showed projected active users nearly doubling next quarter (1.42M to 3.09M) with significantly extended daily usage times, a strong forward-looking demand signal. The position returned modestly (+6,004), likely because the optimistic forecast was partially anticipated by the market already.
 
-**Lava Cake — SELL 14%:** Health authorities confirming traces of actual lava in Lava Cakes, an immediate sales halt, civil lawsuits, and vendors returning stock all pointed clearly to a sharp negative move. This was our strongest and cleanest signal — unambiguously bad news with direct commercial impact — and it paid off as our most profitable trade (+69,095).
+**Lava Cake, SELL 14%:** Health authorities confirming traces of actual lava in Lava Cakes, an immediate sales halt, civil lawsuits, and vendors returning stock all pointed clearly to a sharp negative move. This was our strongest and cleanest signal, unambiguously bad news with direct commercial impact and it paid off as our most profitable trade (+69,095).
 
-**Pyroflex Cells — SELL 10%:** The abrupt end to the Pyroflex Cell Tax Cut, effectively doubling the levy overnight, was a clear demand headwind. Higher consumer prices would suppress upgrade cycles and slow new purchases. We shorted this and captured a positive return (+9,534), though in hindsight we could have sized this more aggressively given the clarity of the signal.
+**Pyroflex Cells, SELL 10%:** The abrupt end to the Pyroflex Cell Tax Cut, effectively doubling the levy overnight, was a clear demand headwind. Higher consumer prices would suppress upgrade cycles and slow new purchases. We shorted this and captured a positive return (+9,534), though in hindsight we could have sized this more aggressively given the clarity of the signal.
 
-**Sulfur Reactor — BUY 7%:** Index inclusion is a textbook mechanical buy signal — funds tracking Elemental Index 118 would be forced to purchase Sulfur Reactor upon rebalance. We sized this conservatively given the uncertainty around timing, and it returned a small positive (+7,297).
+**Sulfur Reactor, BUY 7%:** Index inclusion is a textbook mechanical buy signal, funds tracking Elemental Index 118 would be forced to purchase Sulfur Reactor upon rebalance. We sized this conservatively given the uncertainty around timing, and it returned a small positive (+7,297).
 
-**Volcanic Incense — BUY 5%:** This was a misjudgement. Whiff Nostralico openly calling his followers to buy Volcanic Incense reads more as a **manipulation red flag** than a genuine fundamental signal — the buying was concentrated in narrow windows around his appearances, a classic pump pattern. We should have either shorted this or avoided it entirely. Instead we went long and lost (-9,786).
+**Volcanic Incense, BUY 5%:** This was a misjudgement. Whiff Nostralico openly calling his followers to buy Volcanic Incense reads more as a manipulation red flag than a genuine fundamental signal, the buying was concentrated in narrow windows around his appearances, a classic pump pattern. We should have either shorted this or avoided it entirely. Instead we went long and lost (-9,786).
 
-**Scoria Paste — BUY 3%:** Lava D. Ray's call to stockpile Scoria Paste was a weak, influencer-driven signal from a self-proclaimed "market medium" with no credible fundamental backing. We sized it minimally out of caution, and the near-zero result (-500) confirmed there was little real signal here.
+**Scoria Paste, BUY 3%:** Lava D. Ray's call to stockpile Scoria Paste was a weak, influencer-driven signal from a self-proclaimed "market medium" with no credible fundamental backing. We sized it minimally out of caution, and the near-zero result (-500) confirmed there was little real signal here.
 
-**Obsidian Cutlery — no position:** The manufacturing halt story was genuinely negative, but the signal was muddied — the contamination was self-inflicted and the company declined to comment, making the magnitude of impact hard to gauge. We opted out, which in hindsight may have been a missed short opportunity.
+**Obsidian Cutlery, no position:** The manufacturing halt story was genuinely negative, but the signal was muddied, the contamination was self-inflicted and the company declined to comment, making the magnitude of impact hard to gauge. We opted out, which in hindsight may have been a missed short opportunity.
 
 ---
 
 **What went wrong:**
 
-The overall loss of -32,909 was driven almost entirely by the **Magma Ink** position. The core error was conflating *exciting news* with *new information* — the Lava Fountain Pen launch had been widely promoted beforehand, meaning the demand enthusiasm for Magma Ink was already reflected in prices by the time we traded. Combined with the quadratic fee structure, a 35% allocation to a story that was largely priced in was very costly. A more disciplined approach would have capped single-position sizes to control fee drag, reserved the largest allocations for the clearest and most *unexpected* signals (Lava Cake and Pyroflex Cells), and treated heavily promoted consumer events with more scepticism.
+The overall loss of -32,909 was driven almost entirely by the **Magma Ink** position. The core error was conflating *exciting news* with *new information*, the Lava Fountain Pen launch had been widely promoted beforehand, meaning the demand enthusiasm for Magma Ink was already reflected in prices by the time we traded. Combined with the quadratic fee structure, a 35% allocation to a story that was largely priced in was very costly. A more disciplined approach would have capped single-position sizes to control fee drag, reserved the largest allocations for the clearest and most *unexpected* signals (Lava Cake and Pyroflex Cells), and treated heavily promoted consumer events with more scepticism.
 
 Manual results:
 
