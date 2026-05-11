@@ -166,7 +166,7 @@ PnL curve:
 ## <a id="manual-challenges"></a>[Manual Challenges](#manual-challenges)
 
 
-### <a id="manual-round-1"></a>[Round 1 — Exchange Auction](#manual-round-1)
+### <a id="manual-round-1"></a>[Round 1: Exchange Auction](#manual-round-1)
 
 Round 1 presented two opening auctions  **Dryland Flax** and **Ember Mushrooms** where we had to submit a single limit order (price, quantity) for each product to maximise profit, knowing that any inventory acquired would be immediately bought back by the Merchant Guild at a fixed price.
 
@@ -193,7 +193,7 @@ Manual results:
 
 <img src="prosperity4/docs/round-1-manual-results.png" width="900">
 
-### <a id="manual-round-2"></a>[Round 2 — Capital Allocation](#manual-round-2)
+### <a id="manual-round-2"></a>[Round 2: Capital Allocation](#manual-round-2)
 
 In Round 2, we were given a capital allocation challenge where we had to distribute a budget of 50,000 XIRECs across three interdependent pillars **Research**, **Scale**, and **Speed** to maximise a nonlinear PnL function:
 
@@ -219,7 +219,7 @@ Manual results:
 
 <img src="prosperity4/docs/round-2-manual-results.png" width="900">
 
-### <a id="manual-round-3"></a>[Round 3 — Invest & Expand](#manual-round-3)
+### <a id="manual-round-3"></a>[Round 3  Invest & Expand](#manual-round-3)
 
 Round 3 required submitting two bids against counterparties with uniformly distributed reserve prices between 670 and 920 (in increments of 5), with any acquired inventory sellable the next day at the fair price of 920.
 
@@ -230,9 +230,9 @@ $$ \left(\frac{920 - \text{avg\_b2}}{920 - b2}\right)^3 $$
 
 **A note on bid precision:** since all reserve prices are multiples of 5, any bid ending in 1 or 6 is functionally equivalent to the nearest lower multiple of 5, a counterparty with reserve price 795 accepts a bid of 796, same as a bid of 799. We therefore deliberately chose values ending in **6** (e.g. 796, 906) to sit just above a clean multiple of 5, capturing every counterparty at that threshold without leaving margin on the table.
 
-**First bid — 796:** This was intentionally conservative, targeting only counterparties with reserve prices at or below 795 (roughly the lower 26% of the distribution). The margin per unit was a comfortable 124. We were not trying to maximise volume here. The first bid carries no competitive penalty, so we prioritised a reliable, high-margin trade over breadth.
+**First bid 796:** This was intentionally conservative, targeting only counterparties with reserve prices at or below 795 (roughly the lower 26% of the distribution). The margin per unit was a comfortable 124. We were not trying to maximise volume here. The first bid carries no competitive penalty, so we prioritised a reliable, high-margin trade over breadth.
 
-**Second bid — 906:** This is where the design of the challenge demanded the most careful reasoning. The cubic penalty for finishing below the mean second bid is severe enough that a slightly-below-average bid can actively destroy value. Our thinking was: if most teams reasoned similarly and clustered their second bids in the 880–910 range out of caution, submitting 906 would likely land at or above the mean, avoiding the penalty entirely while still capturing a thin but positive margin of 14/unit across a large share of the distribution. We accepted that this might be overly conservative, a team willing to bid 850 and trust the field would gain significantly more margin, but the asymmetric downside of the penalty made us reluctant to anchor below what we estimated the crowd would do.
+**Second bid 906:** This is where the design of the challenge demanded the most careful reasoning. The cubic penalty for finishing below the mean second bid is severe enough that a slightly-below-average bid can actively destroy value. Our thinking was: if most teams reasoned similarly and clustered their second bids in the 880–910 range out of caution, submitting 906 would likely land at or above the mean, avoiding the penalty entirely while still capturing a thin but positive margin of 14/unit across a large share of the distribution. We accepted that this might be overly conservative, a team willing to bid 850 and trust the field would gain significantly more margin, but the asymmetric downside of the penalty made us reluctant to anchor below what we estimated the crowd would do.
 
 In hindsight, our allocation was **risk-averse by design**: we prioritised penalty avoidance and margin certainty over volume maximisation, reflecting our belief that in a competitive setting with an opaque penalty structure, staying above the crowd's average was worth more than chasing extra units at lower prices.
 
@@ -240,7 +240,7 @@ Manual results:
 
 <img src="prosperity4/docs/round-3-manual-results.png" width="900">
 
-### <a id="manual-round-4"></a>[Round 4 — Exotic Derivatives](#manual-round-4)
+### <a id="manual-round-4"></a>[Round 4: Exotic Derivatives](#manual-round-4)
 
 Round 4 introduced a rich derivatives universe written on `AETHER_CRYSTAL` vanilla calls and puts at 2 and 3 week expiries, alongside three exotic structures (a Chooser, a Binary Put, and a Knock-Out Put) with the objective of constructing a position that maximised expected PnL across 100 simulations of the underlying, held to expiry.
 
@@ -282,7 +282,7 @@ Distribution by Derivative:
   </tr>
 </table>
 
-### <a id="manual-round-5"></a>[Round 5 — News-Based Trading](#manual-round-5)
+### <a id="manual-round-5"></a>[Round 5: News-Based Trading](#manual-round-5)
 
 Round 5 provided a fictional newspaper: **Ashflow Alpha** and required us to construct a one-day portfolio based on qualitative news interpretation, with a quadratic fee structure that penalised heavy concentration in any single instrument.
 
