@@ -339,8 +339,6 @@ PnL curve:
 
 ### <a id="algo-round-5"></a>[Round 5: Pairs Trading, Zero-Sum Baskets, Correlations](#algo-round-5)
 
-### <a id="algo-round-5"></a>[Round 5: Pairs Trading, Zero-Sum Baskets, Correlations](#algo-round-5)
-
 The final algorithmic round was a massive scale-up: 50 brand new assets across 10 categories, all with a position limit of just 10 units each. The previous round's products were retired entirely. With the competition ending and university exams running in parallel, this was the round where the gap between what we identified and what we could actually implement was widest.
 
 **What We Found in the Data**
@@ -396,7 +394,7 @@ The key insight was that profit per unit depended entirely on the spread between
 2. **Bid aggressively enough** to ensure execution, without pushing the clearing price above the buyback price
 3. **Size our order** to absorb as much profitable volume as possible, accounting for our last-in-line priority at any price level we joined
 
-We built a simulator (`analysis.ipynb`) to sweep candidate clearing prices across the full order book for both products, computing executed volume and our resulting PnL at each level.
+We built a simulator (`mannual.ipynb`) to sweep candidate clearing prices across the full order book for both products, computing executed volume and our resulting PnL at each level.
 
 **Dryland Flax**: Bid 9999 units @31, clearing price @29, buyback @30, no fees:
 
@@ -417,21 +415,21 @@ Manual results:
 
 In Round 2, we were given a capital allocation challenge where we had to distribute a budget of 50,000 XIRECs across three interdependent pillars **Research**, **Scale**, and **Speed** to maximise a nonlinear PnL function:
 
-$$
+```math
 \text{PnL} = \text{Research}(x_r) \times \text{Scale}(x_s) \times \text{Speed}(x_{sp}) - \text{Budget\_Used}
-$$
+```
 
-$$
+```math
 \begin{aligned}
 \text{Research}(x_r) &= 200{,}000 \cdot \frac{\ln(1 + x_r)}{\ln(101)} \\
 \text{Scale}(x_s) &= \frac{7}{100} \cdot x_s \\
 \text{Speed}(x_{sp}) &= 0.9 - 0.8 \cdot \frac{\text{Rank}(x_{sp}) - 1}{R_{\text{max}} - 1}
 \end{aligned}
-$$
+```
 
 The core difficulty was that each pillar followed a different return structure: Research scaled logarithmically, Scale linearly, and Speed was rank-determined relative to all competing teams, making it the most uncertain and strategically sensitive variable.
 
-Our approach was to tackle the problem in two stages. We first focused on **Speed**, since its multiplier depended entirely on the behaviour of other teams rather than a fixed formula. We analysed the rank-based scoring mechanism and reasoned about likely competitor distributions to arrive at a Speed allocation we were confident would secure a strong relative rank. With that anchor fixed, we then ran a **numerical optimisation** (via `optimizer.html` and `analysis.ipynb`) over the remaining budget to find the Research/Scale split that maximised the product of the two analytically-defined pillars given the leftover capital.
+Our approach was to tackle the problem in two stages. We first focused on **Speed**, since its multiplier depended entirely on the behaviour of other teams rather than a fixed formula. We analysed the rank-based scoring mechanism and reasoned about likely competitor distributions to arrive at a Speed allocation we were confident would secure a strong relative rank. With that anchor fixed, we then ran a **numerical optimisation** (via `optimizer.html` and `manual.ipynb`) over the remaining budget to find the Research/Scale split that maximised the product of the two analytically-defined pillars given the leftover capital.
 
 We invested the full budget, landing on a final allocation of **34% Speed, 50% Scale, and 16% Research**, a distribution that prioritised broad market deployment and competitive rank while accepting a modest edge, reflecting the classic market-maker trade-off between reach, speed, and depth of insight.
 
@@ -446,7 +444,10 @@ Round 3 required submitting two bids against counterparties with uniformly distr
 The profit per unit on any trade was simply `920 − bid`, so the lower we bid, the higher the margin, but the fewer counterparties we would trade with. The real strategic tension lived in the **second bid**, which introduced a rank-based penalty: if our second bid fell below the mean second bid of all players, our PnL on those trades was penalised by a steep cubic factor, making an aggressive-but-below-average second bid potentially worse than not trading at all.
 
 The penalization factor was defined as follows:
-$$\left(\frac{920 - \text{avg\_b2}}{920 - b2}\right)^3$$
+
+```math
+\left(\frac{920 - \text{avg\_b2}}{920 - b2}\right)^3
+```
 
 **A note on bid precision:** since all reserve prices are multiples of 5, any bid ending in 1 or 6 is functionally equivalent to the nearest lower multiple of 5, a counterparty with reserve price 795 accepts a bid of 796, same as a bid of 799. We therefore deliberately chose values ending in **6** (e.g. 796, 906) to sit just above a clean multiple of 5, capturing every counterparty at that threshold without leaving margin on the table.
 
@@ -466,7 +467,7 @@ Round 4 introduced a rich derivatives universe written on `AETHER_CRYSTAL` vanil
 
 The most immediate signal was the underlying's annualised volatility of **251%**, an extremely high figure that made any unhedged directional exposure dangerous. A naked long or short in the underlying, or an unbalanced options book, could easily see simulated paths swing wildly enough to overwhelm any edge extracted from mispricing. Our primary concern was therefore not just finding positive expected value, but ensuring that delta exposure, our first-order sensitivity to the underlying's moves, was kept tightly controlled.
 
-**Modelling the exotics:** We built a dedicated simulation framework in `analysis.ipynb`, implementing Python classes for each product with their precise payoff logic. This was essential for the path-dependent products in particular:
+**Modelling the exotics:** We built a dedicated simulation framework in `manual.ipynb`, implementing Python classes for each product with their precise payoff logic. This was essential for the path-dependent products in particular:
 - The **Knock-Out Put** required tracking whether the barrier was breached at any discrete step before expiry
 - The **Chooser Option** required simulating the underlying at the 2-week mark to determine which flavour (call or put) the holder would rationally select, then continuing to expiry
 - The **Binary Put** had a simple terminal payoff but its delta profile is highly nonlinear near the strike, requiring careful treatment
