@@ -226,7 +226,13 @@ The central piece of our analysis was backing out Implied Volatilities (IV) from
 
 <img src="prosperity4/docs/round-3-algo-options-vol-smile.png" width="900">
 
-The fitted global smile is: **IV(x) = 1.15x² + 0.10x + 0.01**, where x = ln(K/S).
+The fitted global smile is:
+
+```math
+\text{IV}(x) = 1.15x^2 + 0.10x + 0.01
+```
+
+where $x = \ln(K/S)$.
 
 Key observations:
 
@@ -509,8 +515,6 @@ Round 5 provided a fictional newspaper: **Ashflow Alpha** and required us to con
 
 Our approach was to read each article and classify the signal as bullish, bearish, or ambiguous, then size positions proportionally to our conviction while keeping an eye on the fee drag that would erode returns on large allocations.
 
----
-
 **Position-by-position rationale:**
 
 **Magma Ink, BUY 35%:** The largest allocation, driven by the front-page story about the merger between Stip Stationery Enterprises and Splatter Inc. and the launch of the limited-edition Lava Fountain Pen. The crowd queuing for six hours and the "hot drop" framing read as a strong demand signal for Magma Ink as the ink supplier. In hindsight, this was our most costly mistake: the news was likely **already priced in** given how widely the event had been promoted beforehand, and the 35% allocation triggered a fee of 122,500; making the position nearly impossible to profit from even with a positive underlying return. We over-weighted a sentiment story that the market had already absorbed.
@@ -528,8 +532,6 @@ Our approach was to read each article and classify the signal as bullish, bearis
 **Scoria Paste, BUY 3%:** Lava D. Ray's call to stockpile Scoria Paste was a weak, influencer-driven signal from a self-proclaimed "market medium" with no credible fundamental backing. We sized it minimally out of caution, and the near-zero result (-500) confirmed there was little real signal here.
 
 **Obsidian Cutlery, no position:** The manufacturing halt story was genuinely negative, but the signal was muddied, the contamination was self-inflicted and the company declined to comment, making the magnitude of impact hard to gauge. We opted out, which in hindsight may have been a missed short opportunity.
-
----
 
 **What went wrong:**
 
